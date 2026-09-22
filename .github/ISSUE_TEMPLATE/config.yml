@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞私密报告
+    url: https://github.com/jensen-Zeng/ForgeAgent/security/advisories/new
+    about: 请勿在公开 Issue 中披露凭据、利用细节或私有仓库内容。

@@ -1,0 +1,34 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+htmlcov/
+.coverage
+coverage.xml
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+forge.local.toml
+
+# Agent runtime data
+.forge/
+traces/
+logs/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

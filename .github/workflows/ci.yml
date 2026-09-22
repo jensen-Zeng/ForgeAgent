@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project
+        run: python -m pip install -c requirements/constraints.txt -e ".[dev,rlm]"
+      - name: Ruff format
+        run: python -m ruff format --check .
+      - name: Ruff lint
+        run: python -m ruff check .
+      - name: Type check
+        run: python -m mypy
+      - name: Test
+        run: python -m pytest -q --cov=forge_agent --cov-report=term-missing --cov-fail-under=80
+      - name: Dependency consistency
+        run: python -m pip check
+      - name: Reference evaluation smoke test
+        run: python -m forge_agent eval run --mode reference --repetitions 1 --output .forge/ci-evaluation
+      - name: CLI smoke test
+        run: python -m forge_agent --help

@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-agent"
+version = "0.3.0.dev0"
+description = "A transparent, security-conscious coding agent for local repositories."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jensen Zeng" }]
+keywords = ["coding-agent", "llm", "agent", "developer-tools", "python"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+    "httpx>=0.28,<1",
+    "pathspec>=0.12,<2",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "rich>=13.9,<15",
+    "typer>=0.15,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/jensen-Zeng/ForgeAgent"
+Repository = "https://github.com/jensen-Zeng/ForgeAgent"
+Issues = "https://github.com/jensen-Zeng/ForgeAgent/issues"
+Documentation = "https://github.com/jensen-Zeng/ForgeAgent#readme"
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6,<8",
+    "respx>=0.22,<1",
+    "ruff>=0.9,<1",
+    "types-psutil>=6,<8",
+]
+rlm = [
+    "ipykernel>=6.29,<8",
+    "jupyter-client>=8.6,<9",
+    "psutil>=6,<8",
+]
+release = [
+    "build>=1.2,<2",
+    "twine>=6,<7",
+]
+
+[project.scripts]
+forge = "forge_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+pretty = true
+show_error_codes = true

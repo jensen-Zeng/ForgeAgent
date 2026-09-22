@@ -1,0 +1,55 @@
+name: Bug 报告
+description: 报告可复现的 ForgeAgent 行为错误
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请勿在公开 Issue 中提交 API Key、私有仓库内容或可直接利用的安全细节；安全问题请按 SECURITY.md 私密报告。
+  - type: input
+    id: version
+    attributes:
+      label: ForgeAgent 版本或提交
+      placeholder: 例如 0.3.0.dev0 / commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      placeholder: 例如 Windows 11、Python 3.12.10
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 说明实际行为和预期行为。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 最小复现步骤
+      description: 请先删除密钥、用户名、绝对路径和私有代码。
+      placeholder: |
+        1. 执行 …
+        2. 输入 …
+        3. 观察到 …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏的输出
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认内容中没有凭据、私有代码或个人敏感信息。
+          required: true
+        - label: 这不是需要私密报告的安全漏洞。
+          required: true
