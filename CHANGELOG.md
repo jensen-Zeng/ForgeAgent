@@ -8,6 +8,15 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 
 - Reframed public documentation around ForgeAgent as an independent open-source product.
 - Consolidated architecture, implementation, security, and verification guidance.
+- `forge run` and `forge rlm run` now use an isolated Git worktree by default; use `--in-place` to explicitly share the selected checkout.
+- Added `forge workspace create/list/diff` to create, inspect, and review retained managed worktrees.
+
+### Security
+
+- Added cross-process workspace/run and per-file advisory locks, host-observed file-version checks, read-before-patch enforcement, and explicit stale-write errors for shared-checkout editing.
+- Added exclusive RLM session lifetime ownership to prevent duplicate resume/repair; shutdown waits for active work to unwind while preserving not-yet-started queued inputs for recovery.
+- Isolated worktrees require a committed, clean source checkout (allowing `.forge/` data) and do not copy or discard uncommitted changes.
+- Worktree isolation is a working-copy boundary, not a sandbox; editor processes do not honor ForgeAgent advisory locks.
 
 ## 0.3.0.dev0
 

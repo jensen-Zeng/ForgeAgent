@@ -15,6 +15,7 @@ from typing import ClassVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from forge_agent.locking import LockUnavailable, acquire_locks
 from forge_agent.tools.base import BaseTool, ToolError, ToolExecution
 from forge_agent.tools.workspace import Workspace, WorkspaceError
 from forge_agent.tracing import EventKind, RunTracer
@@ -30,10 +31,13 @@ class PatchEdit(BaseModel):
     path: str = Field(min_length=1)
     old_text: str | None = None
     new_text: str
+    base_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_operation(self) -> PatchEdit:
         if self.old_text is None:
+            if self.base_sha256 is not None:
+                raise ValueError("new-file creation must not specify base_sha256")
             if not self.new_text:
                 raise ValueError("new files cannot be empty")
         elif not self.old_text:
@@ -86,7 +90,9 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
     name = "apply_patch"
     description = (
         "Create or modify text files using exact old_text/new_text replacements. "
-        "Existing context must match exactly once; file deletion is not supported."
+        "Read existing files with read_file first. Existing context must match exactly once; "
+        "on stale_read or concurrent_modification, re-read and review the change. "
+        "Optional base_sha256 pins the read version. File deletion is not supported."
     )
     parameters_type: ClassVar[type[BaseModel]] = ApplyPatchParameters
 
@@ -101,6 +107,8 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
         approval_handler: PatchApprovalHandler | None = None,
         approval_mode: str = "never",
         tracer: RunTracer | None = None,
+        require_read: bool = False,
+        lock_timeout: float = 5.0,
     ) -> None:
         if approval_mode not in {"always", "never"}:
             raise ValueError("patch approval_mode must be 'always' or 'never'")
@@ -112,6 +120,8 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
         self._approval_handler = approval_handler
         self._approval_mode = approval_mode
         self._tracer = tracer
+        self._require_read = require_read
+        self._lock_timeout = lock_timeout
 
     def run(self, parameters: ApplyPatchParameters) -> ToolExecution:
         if len(parameters.edits) > self._max_files:
@@ -127,6 +137,9 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
             )
 
         prepared = [self._prepare(edit) for edit in parameters.edits]
+        canonical = [os.path.normcase(str(edit.path)) for edit in prepared]
+        if len(set(canonical)) != len(canonical):
+            raise ToolError("Patch paths alias the same file", code="duplicate_patch_target")
         total_added = sum(edit.added_lines for edit in prepared)
         total_deleted = sum(edit.deleted_lines for edit in prepared)
         if total_added > self._max_added_lines:
@@ -158,7 +171,16 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
                 code="approval_denied",
                 metadata={"changed_files": cast(list[JsonValue], changed_files)},
             )
-        self._write_transaction(prepared)
+        try:
+            with acquire_locks((edit.path for edit in prepared), timeout=self._lock_timeout):
+                self._write_transaction(prepared)
+        except LockUnavailable as error:
+            raise ToolError(
+                "Another writer holds the file lock; retry after re-reading the file",
+                code="write_lock_timeout",
+            ) from error
+        for edit in prepared:
+            self._workspace.record_read(edit.path, edit.new_bytes)
         return ToolExecution(
             output=combined_diff,
             metadata={
@@ -226,6 +248,21 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
                 original_bytes,
                 display,
             )
+            actual = hashlib.sha256(original_bytes).hexdigest()
+            observed = self._workspace.read_version(path)
+            if self._require_read and observed is None:
+                raise ToolError(
+                    f"Read {display} with read_file before modifying it", code="read_required"
+                )
+            if any(
+                version is not None and version != actual
+                for version in (observed, edit.base_sha256)
+            ):
+                raise ToolError(
+                    f"{display} changed since it was read; re-read and review before retrying",
+                    code="stale_read",
+                    metadata={"path": display},
+                )
             mode = path.stat().st_mode
 
         old_text = self._canonical_newlines(edit.old_text or "")
@@ -332,23 +369,37 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
                 for edit in prepared:
                     if edit.temp_path is None:
                         raise AssertionError("temporary patch file was not prepared")
-                    os.replace(edit.temp_path, edit.path)
-                    edit.temp_path = None
+                    self._verify_unchanged(edit)
+                    if edit.original_bytes is None:
+                        # Linking is an atomic create-if-absent, never an overwrite.
+                        os.link(edit.temp_path, edit.path)
+                    else:
+                        os.replace(edit.temp_path, edit.path)
+                        edit.temp_path = None
+                    committed.append(edit)
                     if edit.mode is not None:
                         edit.path.chmod(edit.mode)
-                    committed.append(edit)
-            except OSError as error:
-                self._rollback(committed)
+            except (OSError, ToolError) as error:
+                conflicts = self._rollback(committed)
                 raise ToolError(
                     f"Atomic patch commit failed: {type(error).__name__}",
-                    code="patch_write_error",
+                    code=error.code if isinstance(error, ToolError) else "patch_write_error",
+                    metadata={"rollback_conflicts": cast(list[JsonValue], conflicts)},
                 ) from error
             for edit in prepared:
-                if edit.path.read_bytes() != edit.new_bytes:
-                    self._rollback(prepared)
+                try:
+                    verified = (
+                        edit.path.resolve() == edit.path
+                        and edit.path.read_bytes() == edit.new_bytes
+                    )
+                except OSError:
+                    verified = False
+                if not verified:
+                    conflicts = self._rollback(prepared)
                     raise ToolError(
                         f"Patch verification failed for {edit.display_path}",
                         code="patch_verification_error",
+                        metadata={"rollback_conflicts": cast(list[JsonValue], conflicts)},
                     )
                 self._invalidate_python_cache(edit.path)
         finally:
@@ -377,6 +428,8 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
             ) from error
 
     def _verify_unchanged(self, edit: _PreparedEdit) -> None:
+        if edit.path.resolve() != edit.path or not self._workspace.is_within_root(edit.path):
+            raise ToolError("Patch path changed during update", code="concurrent_modification")
         if edit.original_bytes is None:
             if edit.path.exists():
                 raise ToolError(
@@ -397,9 +450,15 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
                 code="concurrent_modification",
             )
 
-    def _rollback(self, committed: list[_PreparedEdit]) -> None:
+    def _rollback(self, committed: list[_PreparedEdit]) -> list[str]:
+        conflicts: list[str] = []
         for edit in reversed(committed):
+            rollback_path: Path | None = None
             try:
+                # A rollback must not undo a third party's newly saved bytes.
+                if edit.path.resolve() != edit.path or edit.path.read_bytes() != edit.new_bytes:
+                    conflicts.append(edit.display_path)
+                    continue
                 if edit.original_bytes is None:
                     edit.path.unlink(missing_ok=True)
                 else:
@@ -411,12 +470,22 @@ class ApplyPatchTool(BaseTool[ApplyPatchParameters]):
                         delete=False,
                     ) as stream:
                         stream.write(edit.original_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
                         rollback_path = Path(stream.name)
+                    if edit.path.read_bytes() != edit.new_bytes:
+                        conflicts.append(edit.display_path)
+                        continue
                     os.replace(rollback_path, edit.path)
                     if edit.mode is not None:
                         edit.path.chmod(edit.mode)
             except OSError:
-                continue
+                conflicts.append(edit.display_path)
+            finally:
+                if rollback_path is not None:
+                    with suppress(OSError):
+                        rollback_path.unlink(missing_ok=True)
+        return conflicts
 
     def _invalidate_python_cache(self, path: Path) -> None:
         if path.suffix.casefold() != ".py":

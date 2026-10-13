@@ -27,6 +27,7 @@ from forge_agent.evaluation import (
     load_report,
     write_report,
 )
+from forge_agent.locking import LockUnavailable, acquire_locks
 from forge_agent.models import ModelProvider, create_model_provider
 from forge_agent.policy import CommandReview
 from forge_agent.prompts import PROMPT_VERSION
@@ -53,6 +54,7 @@ from forge_agent.tracing import (
     Redactor,
     RunTracer,
 )
+from forge_agent.worktrees import IsolatedWorkspace, WorktreeError, WorktreeManager
 
 EXIT_FAILURE = 1
 EXIT_CONFIGURATION = 2
@@ -70,11 +72,13 @@ tools_app = typer.Typer(help="Inspect the tools available to the agent.")
 eval_app = typer.Typer(help="Run repeatable ForgeAgent evaluation tasks.")
 rlm_app = typer.Typer(help="Run explicitly trusted persistent RLM sessions.")
 session_app = typer.Typer(help="Inspect and explicitly repair persistent sessions.")
+workspace_app = typer.Typer(help="Create and review isolated coding workspaces.")
 app.add_typer(config_app, name="config")
 app.add_typer(tools_app, name="tools")
 app.add_typer(eval_app, name="eval")
 app.add_typer(rlm_app, name="rlm")
 app.add_typer(session_app, name="session")
+app.add_typer(workspace_app, name="workspace")
 
 
 def version_callback(value: bool) -> None:
@@ -121,17 +125,78 @@ def run_command(
             help="JSONL trace path; defaults to WORKSPACE/.forge/traces/RUN_ID.jsonl.",
         ),
     ] = None,
+    isolate: Annotated[
+        bool, typer.Option("--isolate/--in-place", help="Use a separate Git worktree (default).")
+    ] = True,
 ) -> None:
     """Run the coding agent against one bounded workspace."""
     settings = _load_cli_settings(workspace=workspace, config_path=config_path)
-    config = settings.to_run_config(task)
-    resolved_trace = _resolve_trace_path(trace_path, config)
-    _show_run_configuration(settings, config, resolved_trace)
-
     try:
         provider = _create_live_provider(settings.model)
     except ConfigurationError as error:
         _configuration_failure(error)
+    handed_off = False
+    try:
+        settings = _select_run_workspace(settings, isolate=isolate)
+        with acquire_locks((_run_lock_path(settings),), timeout=0):
+            handed_off = True
+            _run_safe_workspace(settings, task, trace_path, provider)
+    except (WorktreeError, LockUnavailable) as error:
+        _workspace_failure(error)
+    finally:
+        if not handed_off:
+            asyncio.run(provider.aclose())
+
+
+def _run_safe_workspace(
+    settings: ForgeSettings,
+    task: str,
+    trace_path: Path | None,
+    provider: ModelProvider,
+) -> None:
+    try:
+        result, resolved_trace, tracer = asyncio.run(
+            _prepare_and_run_safe_workspace(settings, task, trace_path, provider)
+        )
+    except KeyboardInterrupt:
+        console.print("[yellow]Run cancelled by user.[/yellow]")
+        raise typer.Exit(code=EXIT_CANCELLED) from None
+
+    _show_run_result(result, resolved_trace, tracer)
+    if result.status is RunStatus.COMPLETED:
+        return
+    if result.status is RunStatus.STOPPED:
+        raise typer.Exit(code=EXIT_STOPPED)
+    if result.status is RunStatus.CANCELLED:
+        raise typer.Exit(code=EXIT_CANCELLED)
+    raise typer.Exit(code=EXIT_FAILURE)
+
+
+async def _prepare_and_run_safe_workspace(
+    settings: ForgeSettings,
+    task: str,
+    trace_path: Path | None,
+    provider: ModelProvider,
+) -> tuple[RunResult, Path, RunTracer]:
+    try:
+        config, resolved_trace, tracer, runtime = _prepare_safe_workspace(
+            settings, task, trace_path, provider
+        )
+        return await runtime.run(config), resolved_trace, tracer
+    finally:
+        # Own cleanup from setup through the final response, in the same event loop.
+        await provider.aclose()
+
+
+def _prepare_safe_workspace(
+    settings: ForgeSettings,
+    task: str,
+    trace_path: Path | None,
+    provider: ModelProvider,
+) -> tuple[RunConfig, Path, RunTracer, AgentRuntime]:
+    config = settings.to_run_config(task)
+    resolved_trace = _resolve_trace_path(trace_path, config)
+    _show_run_configuration(settings, config, resolved_trace)
 
     tracer = RunTracer(
         run_id=config.run_id,
@@ -166,20 +231,7 @@ def run_command(
             preserve_recent_messages=settings.context.preserve_recent_messages,
         ),
     )
-    try:
-        result = asyncio.run(_run_and_close(runtime, config, provider))
-    except KeyboardInterrupt:
-        console.print("[yellow]Run cancelled by user.[/yellow]")
-        raise typer.Exit(code=EXIT_CANCELLED) from None
-
-    _show_run_result(result, resolved_trace, tracer)
-    if result.status is RunStatus.COMPLETED:
-        return
-    if result.status is RunStatus.STOPPED:
-        raise typer.Exit(code=EXIT_STOPPED)
-    if result.status is RunStatus.CANCELLED:
-        raise typer.Exit(code=EXIT_CANCELLED)
-    raise typer.Exit(code=EXIT_FAILURE)
+    return config, resolved_trace, tracer, runtime
 
 
 @rlm_app.command("run")
@@ -194,6 +246,9 @@ def rlm_run_command(
         ),
     ] = False,
     config_path: Annotated[Path | None, typer.Option("--config")] = None,
+    isolate: Annotated[
+        bool, typer.Option("--isolate/--in-place", help="Use a separate Git worktree (default).")
+    ] = True,
 ) -> None:
     """Start a durable trusted RLM session; safe forge run remains unchanged."""
     _require_workspace_trust(trust_workspace)
@@ -202,13 +257,31 @@ def rlm_run_command(
         provider = _create_live_provider(settings.model)
     except ConfigurationError as error:
         _configuration_failure(error)
-    store = SessionStore.create(settings.workspace.allowed_root)
-    application = RLMApplication(
-        settings=settings,
-        provider=provider,
-        store=store,
-        registry_factory=lambda: _build_registry(settings),
-    )
+    handed_off = False
+    try:
+        settings = _select_run_workspace(settings, isolate=isolate)
+        with acquire_locks((_run_lock_path(settings),), timeout=0):
+            handed_off = True
+            _start_rlm_workspace(settings, provider, task)
+    except (WorktreeError, LockUnavailable) as error:
+        _workspace_failure(error)
+    finally:
+        if not handed_off:
+            asyncio.run(provider.aclose())
+
+
+def _start_rlm_workspace(settings: ForgeSettings, provider: ModelProvider, task: str) -> None:
+    try:
+        store = SessionStore.create(settings.workspace.allowed_root)
+        application = RLMApplication(
+            settings=settings,
+            provider=provider,
+            store=store,
+            registry_factory=lambda: _build_registry(settings),
+        )
+    except BaseException:
+        asyncio.run(provider.aclose())
+        raise
     console.print(
         "[bold yellow]Trusted RLM mode:[/bold yellow] the IPython kernel inherits your "
         "current user permissions and is not a sandbox."
@@ -233,16 +306,28 @@ def rlm_resume_command(
     _require_workspace_trust(trust_workspace)
     settings = _load_cli_settings(workspace=workspace, config_path=config_path)
     try:
-        provider = _create_live_provider(settings.model)
+        with acquire_locks((_run_lock_path(settings),), timeout=0):
+            _resume_rlm_workspace(settings, session_id)
+    except LockUnavailable as error:
+        _workspace_failure(error)
+
+
+def _resume_rlm_workspace(settings: ForgeSettings, session_id: str) -> None:
+    try:
         store = SessionStore.open(settings.workspace.allowed_root, session_id)
+        provider = _create_live_provider(settings.model)
     except (ConfigurationError, FileNotFoundError, ValueError) as error:
         _configuration_failure(ConfigurationError(str(error)))
-    application = RLMApplication(
-        settings=settings,
-        provider=provider,
-        store=store,
-        registry_factory=lambda: _build_registry(settings),
-    )
+    try:
+        application = RLMApplication(
+            settings=settings,
+            provider=provider,
+            store=store,
+            registry_factory=lambda: _build_registry(settings),
+        )
+    except BaseException:
+        asyncio.run(provider.aclose())
+        raise
     try:
         results = asyncio.run(_run_rlm_application(application))
     except KeyboardInterrupt:
@@ -321,8 +406,15 @@ def session_repair_command(
     """Inspect a tail by default; mutate it only with --truncate-tail."""
     try:
         store = SessionStore.open(workspace, session_id)
-        before = store.inspect_tail()
-        after = store.repair_tail(truncate_tail=truncate_tail)
+        with acquire_locks(
+            (
+                _workspace_run_resource(workspace),
+                store.directory / "runtime-owner",
+            ),
+            timeout=0,
+        ):
+            before = store.inspect_tail()
+            after = store.repair_tail(truncate_tail=truncate_tail)
     except (OSError, ValueError) as error:
         console.print(f"[red]Unable to repair session:[/red] {error}")
         raise typer.Exit(code=EXIT_CONFIGURATION) from None
@@ -330,6 +422,86 @@ def session_repair_command(
     console.print(f"After:  {after.model_dump_json()}")
     if not truncate_tail and not before.valid:
         console.print("[yellow]No file was changed; rerun with --truncate-tail.[/yellow]")
+
+
+def _run_lock_path(settings: ForgeSettings) -> Path:
+    return _workspace_run_resource(settings.workspace.allowed_root)
+
+
+def _workspace_run_resource(workspace: Path) -> Path:
+    resolved = workspace.resolve()
+    # A subdirectory and its Git root share one checkout; separate worktrees
+    # stop at their own .git marker and remain independently runnable.
+    for directory in (resolved, *resolved.parents):
+        if (directory / ".git").exists():
+            return directory / ".forge" / "active-run"
+    return resolved / ".forge" / "active-run"
+
+
+def _workspace_failure(error: WorktreeError | LockUnavailable) -> NoReturn:
+    code = error.code if isinstance(error, WorktreeError) else "workspace_busy"
+    console.print(f"Workspace error ({code}): {error}", markup=False)
+    if isinstance(error, WorktreeError):
+        console.print(
+            "Isolation requires a clean committed Git root. Use --in-place only "
+            "when you intend to edit the shared directory directly."
+        )
+    raise typer.Exit(code=EXIT_CONFIGURATION)
+
+
+def _select_run_workspace(settings: ForgeSettings, *, isolate: bool) -> ForgeSettings:
+    if not isolate:
+        console.print("In-place mode: files are shared with your editor; external saves may race.")
+        return settings
+    isolated = WorktreeManager(settings.workspace.allowed_root).create()
+    _show_isolated_workspace(isolated)
+    return settings.model_copy(
+        update={"workspace": settings.workspace.model_copy(update={"allowed_root": isolated.path})}
+    )
+
+
+def _show_isolated_workspace(isolated: IsolatedWorkspace) -> None:
+    console.print(f"Isolated workspace: {isolated.id}", markup=False)
+    console.print(f"Source: {isolated.source}", markup=False)
+    console.print(f"Checkout: {isolated.path}", markup=False)
+    console.print(f"Branch: {isolated.branch} (base {isolated.base_commit[:12]})", markup=False)
+    console.print("Changes stay in this checkout. Review with forge workspace diff before merging.")
+
+
+@workspace_app.command("create")
+def workspace_create_command(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path("."),
+) -> None:
+    """Create a retained worktree from a clean committed source without a model call."""
+    try:
+        _show_isolated_workspace(WorktreeManager(workspace).create())
+    except WorktreeError as error:
+        _workspace_failure(error)
+
+
+@workspace_app.command("list")
+def workspace_list_command(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path("."),
+) -> None:
+    """List retained isolated checkouts and branches."""
+    try:
+        entries = WorktreeManager(workspace).list()
+    except WorktreeError as error:
+        _workspace_failure(error)
+    for entry in entries:
+        _show_isolated_workspace(entry)
+
+
+@workspace_app.command("diff")
+def workspace_diff_command(
+    workspace_id: Annotated[str, typer.Argument()],
+    workspace: Annotated[Path, typer.Option("--workspace", "-w")] = Path("."),
+) -> None:
+    """Review changes against the recorded base, including safe untracked text files."""
+    try:
+        console.print(WorktreeManager(workspace).diff(workspace_id), markup=False)
+    except WorktreeError as error:
+        _workspace_failure(error)
 
 
 @app.command("doctor")
@@ -522,18 +694,6 @@ def run_evaluations(
     console.print(f"Markdown: {markdown_path}")
 
 
-async def _run_and_close(
-    runtime: AgentRuntime,
-    config: RunConfig,
-    provider: ModelProvider,
-) -> RunResult:
-    """Run once and always release provider-owned HTTP resources."""
-    try:
-        return await runtime.run(config)
-    finally:
-        await provider.aclose()
-
-
 async def _run_rlm_application(
     application: RLMApplication,
     *,
@@ -623,6 +783,7 @@ def _build_registry(
                 approval_handler=_approve_patch,
                 approval_mode=settings.patches.approval,
                 tracer=tracer,
+                require_read=True,
             ),
             GitDiffTool(workspace),
             GitStatusTool(workspace),

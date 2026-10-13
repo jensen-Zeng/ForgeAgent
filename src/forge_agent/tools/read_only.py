@@ -186,6 +186,7 @@ class ReadFileTool(BaseTool[ReadFileParameters]):
                 "end_line": end_line,
                 "total_lines": len(lines),
                 "truncated": truncated,
+                "sha256": self._workspace.record_read(path, raw),
             },
         )
 

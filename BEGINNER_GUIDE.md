@@ -91,8 +91,10 @@ The process environment is preferable to a committed configuration file for secr
 ## 6. Run the safe mode
 
 ```powershell
-.\.venv\Scripts\forge.exe run "Explain the failing tests and propose the smallest fix" --workspace <workspace>
+.\.venv\Scripts\forge.exe run "Explain the failing tests and propose the smallest fix" --workspace <git-repository-root>
 ```
+
+普通项目建议把 `--workspace` 指向 Git 仓库顶层，并保留默认隔离模式。它要求源目录已经有提交、没有已跟踪或暂存改动（包括 `.forge/` 下），且未跟踪文件只存在于 `.forge/` 下。若使用仓库内的演示 fixture、嵌套子目录或非 Git 目录，应明确加 `--in-place`；这表示共享当前目录，并启用后文介绍的锁和陈旧版本检查。
 
 Safe mode does not start an IPython kernel. Repository access is exposed through typed tools with local validation:
 
@@ -134,6 +136,27 @@ Entries use append-only UTF-8 JSON Lines. If a process stops during a write, For
 .\.venv\Scripts\forge.exe session show <session-id> --workspace <workspace>
 .\.venv\Scripts\forge.exe session repair <session-id> --workspace <workspace> --truncate-tail
 ```
+
+### 并发修改：默认使用独立工作副本
+
+`forge run` 和 `forge rlm run` 默认不会直接改你传入的源 checkout，而是在 Git worktree 中创建独立副本。可以把它理解成：Agent 在一条新分支上工作，你仍可在原目录继续编辑；两边文件互不自动同步。
+
+创建副本要求源目录是 Git 仓库顶层、已经有至少一个提交，没有已跟踪或暂存改动（包括 `.forge/` 下），并且未跟踪文件只能位于 `.forge/` 下。ForgeAgent 不会替你 stash、删除或复制这些改动。如果命令提示源工作区不干净，请先自己提交或妥善保存改动，再运行。被 Git 忽略的文件（例如 `.venv`）也不会自动复制进新 worktree。
+
+每次运行会显示 worktree ID、checkout 路径和 `forge/<uuid>` 分支。查看列表和差异：
+
+```powershell
+forge workspace list --workspace <source-repository>
+forge workspace diff <WORKTREE_ID> --workspace <source-repository>
+```
+
+Agent 不会自动提交、合并、删除或推送。确认差异后，在显示的 checkout 中只暂存你审查过的文件，再提交；最后在源仓库合并 `forge/<WORKTREE_ID>`。如果两边改了相同代码，Git 会要求人工解决冲突。合并前保存编辑器中未保存的缓冲区，再检查源仓库状态。
+
+默认 worktree 中创建的 RLM 会话和轨迹位于该 checkout 下的 `.forge/`。恢复或查看时，`--workspace` 要指向运行时显示的 checkout 路径，而不是源目录。
+
+如果确实需要直接操作当前目录，可以显式传 `--in-place`。同一目录同时只允许一个 ForgeAgent run/resume；补丁还会验证 Agent 最近读取的文件版本，并在审批后获取文件锁。版本变化时会拒绝写入，要求重新读取并重新审批。编辑器不遵守这些锁，未保存缓冲区也不可见，因此人和 Agent 同时修改同一个原地文件时仍有竞态。多个 Agent 或人机并行时，优先使用默认 worktree。
+
+Worktree 只是独立 Git 工作副本，不是沙箱。尤其在可信 RLM 模式中，Kernel 可以用任意 Python 和绝对路径访问当前用户有权访问的文件；不要把 worktree 当作阻止不可信代码越界的安全边界。详细规则见 [docs/CONCURRENT_EDITING.md](docs/CONCURRENT_EDITING.md)。
 
 ## 8. Project architecture
 

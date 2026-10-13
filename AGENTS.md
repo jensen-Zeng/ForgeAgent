@@ -8,9 +8,9 @@
 - 当前包版本：`0.3.0.dev0`。
 - Git：默认分支 `main`；公开版本与变更记录见 `CHANGELOG.md`。
 - 当前开发线：`0.3.0.dev0`；核心安全模式和第一阶段可信 RLM 已有离线自动化覆盖，外部验收见路线图。
-- 最近完整本地回归：`224 passed`。
-- 最近总体覆盖率：`86.16%`，CI 门禁为 80%。
-- GitHub CI 已在 Windows/Linux、Python 3.12/3.13 四个组合通过：[CI #2](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/33252930217)。
+- 最近完整本地回归：`264 passed`（Windows / Python 3.12.9，2026-10-13）。
+- 最近总体覆盖率：`87.02%`，CI 门禁为 80%。
+- 较早版本的 GitHub CI 已在 Windows/Linux、Python 3.12/3.13 四个组合通过：[CI #2](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/33252930217)；当前并发编辑改动尚未经过 GitHub Actions。
 - RLM 离线测试使用真实本地 IPython Kernel 和 Faux Provider；不代表真实模型质量。
 - Docker 隔离、真实 Provider 效果与费用限制必须在实际部署环境中单独验证。
 - 不得把 Fake HTTP 测试、reference 评测或模拟 Docker 调用描述为真实模型效果或真实容器隔离证据。
@@ -33,7 +33,7 @@ git log -5 --oneline
 4. [docs/ROADMAP_PRIORITIES.md](./docs/ROADMAP_PRIORITIES.md)：只包含尚未完成的事项。
 5. 与任务相关的 ADR、Docker、模型或失败案例文档。
 
-新手背景说明见 [BEGINNER_GUIDE.md](./BEGINNER_GUIDE.md)，模型配置见 [MODEL_CONFIGURATION.md](./MODEL_CONFIGURATION.md)，安全边界见 [SECURITY.md](./SECURITY.md)。
+新手背景说明见 [BEGINNER_GUIDE.md](./BEGINNER_GUIDE.md)，模型配置见 [MODEL_CONFIGURATION.md](./MODEL_CONFIGURATION.md)，安全边界见 [SECURITY.md](./SECURITY.md)，并发编辑见 [docs/CONCURRENT_EDITING.md](./docs/CONCURRENT_EDITING.md)。
 
 ## 3. 核心运行链路
 
@@ -82,6 +82,8 @@ forge rlm --trust-workspace
 | `src/forge_agent/tools/workspace.py` | 工作区和敏感路径边界 | Windows 路径、符号链接、越界 |
 | `src/forge_agent/tools/read_only.py` | 列目录、搜索、读文件 | 输出上限、二进制和敏感文件 |
 | `src/forge_agent/tools/patch.py` | 精确上下文补丁和原子写入 | 并发修改、审批、回滚、已有 Diff |
+| `src/forge_agent/locking.py` | 线程与跨进程 advisory lock | 锁文件不可删除；锁只协调采用同一协议的 ForgeAgent 进程 |
+| `src/forge_agent/worktrees.py` | Git worktree 创建、清单校验和有界差异审查 | 仅接受已提交的 Git 根目录且无 tracked/staged 改动、untracked 仅限 `.forge/`；不自动合并或清理 |
 | `src/forge_agent/tools/git.py` | Git status/diff | 只读、超时、错误封装 |
 | `src/forge_agent/policy.py` | `SAFE / REVIEW / DENY` 分类 | 模型不得影响风险决策 |
 | `src/forge_agent/tools/command.py` | 审批、自动路由、本地/容器执行 | 无 Shell、净化环境、失败关闭 |
@@ -97,6 +99,13 @@ forge rlm --trust-workspace
 - 所有目标路径必须经过 `Workspace` 解析，并保持在明确的工作区根目录内。
 - 敏感文件、越界路径、符号链接逃逸、任意删除和任意文件覆盖继续拒绝。
 - 补丁使用精确旧文本/新文本编辑、预览 Diff、人工批准和原子替换。
+- `forge run` 与 `forge rlm run` 默认使用单独 Git worktree；源仓库必须有提交、无已跟踪或暂存改动（包括 `.forge/` 下），未跟踪项仅可在 `.forge/` 下；不会自动 stash、复制忽略文件或丢弃改动。
+- 托管 worktree 对使用已配置外部 clean/smudge/process Git filter 的路径失败关闭（包括常见 Git LFS 配置），避免 checkout/diff 执行本机程序；需要这些 filter 时只能显式 `--in-place`，但该模式不是沙箱。
+- 默认 worktree 是工作副本隔离，不是沙箱。Agent 不自动 commit、merge、delete 或 push；通过 `forge workspace diff ID --workspace SOURCE` 审查，再显式提交/合并。
+- `--in-place` 是显式共享目录模式：CLI run/resume 使用跨进程工作区运行锁；生产工具 registry 要求先 read，再由 Host 记录版本/摘要；patch 在审批后获取排序的跨进程 advisory file lock 并重新验证。
+- 每个 RLM 会话有独立的生命周期所有权锁，阻止另一个进程同时 resume/repair；shutdown 先取消并等待活动操作退出后释放锁，未开始的持久队列输入留待后续恢复。
+- `stale_read`、`read_required`、`concurrent_modification` 或 `write_lock_timeout` 后，必须重新读取并重新审批，不做自动三方合并。多文件写入不是原子事务；回滚尽力而为。
+- 文件锁只协调 ForgeAgent 实例。编辑器和其他程序不遵守锁；未保存缓冲区不可见，仍有 TOCTOU 风险。人机并行优先用独立 worktree。
 - 不要用“模型说路径安全”代替本地验证。
 
 ### 命令边界
@@ -123,6 +132,7 @@ forge rlm --trust-workspace
 ### 可信 RLM 边界
 
 - `forge run` 永远不启动 Kernel；只有 `forge rlm ... --trust-workspace` 可以启动。
+- 默认 worktree 不改变 RLM Kernel 对绝对路径的访问能力，也不把子 Agent 变成独立安全主体；所有可信 Python 仍按当前用户权限执行。
 - Kernel 继承当前用户权限，可以直接使用 `os`、`subprocess` 和文件 API，不构成 Docker 沙箱。
 - Kernel 环境移除常见凭据变量，API Key、SessionStore、Provider 和 ChildManager 对象不得注入。
 - Host Request 的身份由所属 Kernel/Bridge 绑定；拒绝 payload 中的伪造 session 身份和未知字段。

@@ -50,6 +50,7 @@ class SessionRuntime:
         self._submit_lock = asyncio.Lock()
         self._next_sequence = 0
         self._busy = False
+        self._drain_cancelled = False
         self._scope: CancellationScope | None = None
         self._active_envelope: InputEnvelope | None = None
         self._steer_originals: dict[UUID, str] = {}
@@ -115,7 +116,8 @@ class SessionRuntime:
 
     async def run_until_idle(self) -> tuple[TurnResult, ...]:
         results: list[TurnResult] = []
-        while not self._queue.empty():
+        self._drain_cancelled = False
+        while not self._drain_cancelled and not self._queue.empty():
             sequence, envelope = await self._queue.get()
             self._busy = True
             self._scope = CancellationScope()
@@ -160,6 +162,7 @@ class SessionRuntime:
         return tuple(results)
 
     def cancel(self, reason: str = "user_cancelled") -> None:
+        self._drain_cancelled = True
         if self._scope is not None:
             self._scope.cancel(reason)
 

@@ -179,7 +179,7 @@ Runtime 会累计 `Usage.cost` 中已知的美元费用，并在达到上限时�
 真实 API 烟雾测试需要你先选择服务并在当前 PowerShell 设置上述变量。配置检查通过后，可以运行：
 
 ```powershell
-.\.venv\Scripts\forge.exe run "解释这个示例项目的入口和数据流" --workspace .\examples\read_only_repo
+.\.venv\Scripts\forge.exe run "解释这个示例项目的入口和数据流" --workspace .\examples\read_only_repo --in-place
 ```
 
 这会产生真实 API 请求和费用。建议先把 Token、费用及服务商控制台硬限额设置得较低。

@@ -153,8 +153,8 @@ def test_tools_list_is_sorted_and_needs_no_model_credentials(tmp_path: Path) -> 
     )
 
     assert result.exit_code == 0
-    assert result.stdout.index("list_files") < result.stdout.index("read_file")
-    assert result.stdout.index("read_file") < result.stdout.index("search_code")
+    assert result.stdout.index("│ list_files") < result.stdout.index("│ read_file")
+    assert result.stdout.index("│ read_file") < result.stdout.index("│ search_code")
     assert tmp_path.name in result.stdout.replace("\n", "")
 
 
@@ -211,6 +211,7 @@ def test_run_fake_provider_completes_and_writes_replayable_trace(
         [
             "run",
             "解释入口",
+            "--in-place",
             "--workspace",
             str(tmp_path),
             "--trace",
@@ -275,6 +276,7 @@ def test_cancelled_fake_run_uses_exit_130_and_closes_provider(
         [
             "run",
             "Cancel",
+            "--in-place",
             "--workspace",
             str(tmp_path),
             "--trace",

@@ -32,6 +32,16 @@ flowchart LR
 
 The runtime never accepts a model-provided risk class, approval result, or backend. Those are calculated by local policy after tool arguments are parsed.
 
+### Concurrent repository editing
+
+Safe and trusted `run` entry points select a managed Git worktree by default. The source must be the Git top-level directory, have a commit, have no tracked or staged changes (including under `.forge/`), and have no untracked files outside `.forge/`; only untracked `.forge/` metadata is exempt. ForgeAgent does not stash or discard source edits. Each run uses a retained branch `forge/<uuid>` and checkout under `.forge/worktrees/<uuid>/checkout`; session data is rooted in that checkout. Workspace inspection exposes a bounded diff against the recorded base commit, including safe, bounded untracked text files. Secrets, symlinks, binary/oversized files, and excessive output are excluded.
+
+This separates working copies, not processes or permissions. Changes saved in the source checkout while a run is active do not enter the Agent checkout. The Agent does not commit, merge, delete, or push automatically. Users review the diff and merge the branch themselves. The worktree is not a sandbox, especially in RLM mode.
+
+`--in-place` opts into a shared checkout. CLI `run`/`resume` operations acquire an exclusive workspace lock, and an active RLM session additionally owns its session lock. A second CLI operation fails with `workspace_busy`. The production patch registry requires a host-recorded read before modifying a file. After approval, patch application obtains canonical per-file advisory locks in sorted order and verifies the observed digest and exact old text before replacing. Optional `base_sha256` pins the caller's expected version. A changed version fails with `stale_read` or `concurrent_modification`; missing a required read fails with `read_required`; lock contention can fail with `write_lock_timeout`. Recovery requires another read and a new approved patch, never an automatic merge.
+
+New files use atomic create-if-absent. Individual replacements are atomic, but a multi-file patch is not transactional; rollback is best-effort and checks for external modifications before restoring. Advisory locks do not bind editors or unrelated processes, and unsaved buffers are invisible. A narrow time-of-check/time-of-use race remains with applications that ignore the lock.
+
 ## Trusted RLM plane
 
 ```mermaid
@@ -50,7 +60,7 @@ flowchart LR
     ChildRuntime --> Ledger
 ```
 
-Each session has one ordinary turn writer and one serial kernel. Inputs are appended and synchronized before acceptance is returned. Child agents receive isolated contexts, kernels, cancellation scopes, and artifact directories while sharing the root usage budget.
+Each session has one ordinary turn writer and one serial kernel. Inputs are appended and synchronized before acceptance is returned. Child agents receive separate contexts, kernels, cancellation scopes, and artifact directories while sharing the root usage budget and trusted family. This is runtime-state separation, not a security boundary: child kernels can execute arbitrary Python with the same user permissions and may use absolute paths.
 
 RLM mode starts only after explicit `--trust-workspace` consent. The kernel inherits user permissions and is not a sandbox.
 
@@ -86,6 +96,8 @@ Session storage is append-only UTF-8 JSONL. Records include stable IDs, parent I
 | Docker | host daemon/config | target repository code | no network, non-root, read-only root, resource limits |
 | RLM bridge | host-bound kernel identity | comm payload | strict schemas, method allowlist, timeouts |
 | Persistence | single session writer | runtime records | append-only schemas, fsync, explicit repair |
+| Shared checkout writes | ForgeAgent lock and patch host | editor/other process | exclusive run lock, sorted per-file advisory lock, observed digest check; non-cooperating writers remain outside the guarantee |
+| Isolated checkout | Git worktree manager | source repo state | committed source with no tracked/staged changes and only untracked `.forge/` metadata allowed, UUID manifest validation, safe bounded diff; worktree is not a sandbox |
 
 Docker reduces command risk but is not a virtual machine. The trusted IPython kernel is deliberately outside the sandbox model.
 

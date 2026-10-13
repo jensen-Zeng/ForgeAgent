@@ -19,6 +19,7 @@ ForgeAgent 是一个运行在终端中的本地代码仓库 Agent。它把模型
 - OpenAI-compatible、Anthropic、Ollama 和可脚本化 Fake Provider。
 - 模型—工具闭环、流式事件、明确停止原因以及 Token、费用、时间和工具调用预算。
 - 工作区边界、敏感路径拒绝、精确上下文补丁、原子写入和 Git Diff。
+- 默认 Git worktree 隔离、多 Agent checkout 管理，以及显式 `--in-place` 文件锁与陈旧读取检测。
 - `SAFE / REVIEW / DENY` 命令策略，以及本地执行和 Docker 沙箱的自动路由。
 - JSONL 轨迹、统一事件、密钥脱敏、输出截断和可回放运行结果。
 - 持久会话、输入队列、follow-up/steer、恢复标记和结构化上下文压缩。
@@ -30,8 +31,9 @@ ForgeAgent 是一个运行在终端中的本地代码仓库 Agent。它把模型
 当前版本为 `0.3.0.dev0`，属于 Alpha 阶段。
 
 - 默认安全模式和可信 RLM 第一阶段已经完成离线实现。
-- 本地完整回归为 `224 passed`，覆盖率 `86.16%`，门禁为 80%。
+- 本地完整回归为 `264 passed`，覆盖率 `87.02%`，门禁为 80%（Windows / Python 3.12.9；2026-10-13）。
 - GitHub Actions 覆盖 Windows/Linux 与 Python 3.12/3.13。
+- 本次并发编辑改动尚未经过 GitHub Actions；上方 CI badge 和历史成功记录不代表这些改动已在 CI 中验证。
 - RLM 测试使用真实本地 IPython Kernel，但模型为 Faux/Mock；这证明会话和桥接行为，不代表在线模型效果。
 - Docker 规格和自动路由已有测试，但真实隔离能力仍需在实际 Docker 宿主上验收。
 - 真实 Provider 的质量、兼容性和费用结论必须通过用户自己的服务配置和预算验证。
@@ -85,34 +87,48 @@ Ollama 不要求 API Key。完整参数、价格快照和费用边界见 [模型
 ```powershell
 .\.venv\Scripts\forge.exe run `
   "解释这个示例项目的入口、数据流和测试结构" `
-  --workspace .\examples\read_only_repo
+  --workspace .\examples\read_only_repo `
+  --in-place
 ```
 
-每次运行都会显示工作区、Provider、模型和预算，但不会显示密钥。轨迹默认写入目标工作区的 `.forge/traces/<run-id>.jsonl`。
+快速开始用的是仓库内的演示 fixture，它不是独立 Git 根目录，所以命令显式使用 `--in-place`。处理普通项目时，应把 `--workspace` 指向那个 Git 仓库顶层并省略 `--in-place`，让 ForgeAgent 默认创建隔离 worktree。
 
-开始前请提交或备份目标仓库，并审查 Agent 最终给出的 Diff。模型无法绕过本地路径、审批和命令策略。
+默认隔离模式会显示 worktree ID、路径和分支；轨迹写入该 checkout 的 `.forge/traces/<run-id>.jsonl`。源仓库必须是 Git 顶层目录；不能有已跟踪或暂存改动（包括 `.forge/` 下的文件），未跟踪文件仅允许位于 `.forge/` 下。ForgeAgent 不会替你暂存、丢弃或搬运未提交的更改。源码工作文件保持在源 checkout 中，worktree 元数据会写入源仓库 `.forge/worktrees/`。任务完成后，用 `forge workspace diff` 审查，再自行决定如何提交和合并。
+
+托管 worktree 会拒绝对使用 Git LFS 等外部 clean/smudge/process filter 的文件执行 checkout 或 diff，以避免运行本机配置的 filter 程序。此类仓库可显式选择 `--in-place`，但它只是共享工作区模式，不会把 Git filter 或其他代码限制在沙箱中。
+
+开始前请提交或备份目标仓库，并审查 Agent 最终给出的 Diff。隔离 checkout 中的有界仓库工具修改与源 checkout 分开；可信 RLM 的任意 Python 仍可访问当前用户有权限访问的绝对路径。模型无法绕过本地工具的路径、审批和命令策略。
+
+如需显式在当前 checkout 中操作，可使用 `--in-place`。该模式会拒绝同一工作区内并发的 ForgeAgent run/resume，并对文件补丁实施跨进程锁和读取版本校验；每个 RLM 会话另有生命周期所有权锁，防止重复 resume/repair。关闭时会先取消活动 turn 并等其退出，再释放所有权；尚未开始的排队输入仍保存在会话中，可在之后恢复。外部编辑器不遵守这些锁，无法消除所有竞态。并发工作方式和合并步骤见[并发编辑指南](./docs/CONCURRENT_EDITING.md)。
+
+```powershell
+.\.venv\Scripts\forge.exe workspace list --workspace <source-repository>
+.\.venv\Scripts\forge.exe workspace diff <WORKTREE_ID> --workspace <source-repository>
+```
 
 ## 可信 RLM 模式
 
 RLM 模式适合需要持久 Python 状态、长会话、子 Agent 或结构化压缩的任务：
 
+默认 `rlm run` 也会创建 worktree，因此 `--workspace` 必须指向有提交、没有已跟踪/暂存改动（包括 `.forge/` 内）、且未跟踪文件仅位于 `.forge/` 的 Git 仓库顶层。启动后使用命令输出中的 checkout 路径恢复或检查该会话。
+
 ```powershell
 .\.venv\Scripts\forge.exe rlm run `
   "分析仓库并使用 Python 辅助完成任务" `
-  --workspace . `
+  --workspace <source-repository> `
   --trust-workspace
 
-.\.venv\Scripts\forge.exe rlm resume <SESSION_ID> --workspace . --trust-workspace
-.\.venv\Scripts\forge.exe session list --workspace .
-.\.venv\Scripts\forge.exe session show <SESSION_ID> --workspace .
-.\.venv\Scripts\forge.exe session repair <SESSION_ID> --workspace . --truncate-tail
+.\.venv\Scripts\forge.exe rlm resume <SESSION_ID> --workspace <worktree-checkout> --trust-workspace
+.\.venv\Scripts\forge.exe session list --workspace <worktree-checkout>
+.\.venv\Scripts\forge.exe session show <SESSION_ID> --workspace <worktree-checkout>
+.\.venv\Scripts\forge.exe session repair <SESSION_ID> --workspace <worktree-checkout> --truncate-tail
 ```
 
 `--trust-workspace` 是权限确认，不是安全装饰。Kernel 可以直接导入 `os`、`subprocess` 和文件 API，并拥有启动 ForgeAgent 的用户权限。仅对已经信任的仓库启用此模式。
 
 ForgeAgent 会从 Kernel 环境中移除常见凭据变量，不注入 API Key、Provider、SessionStore 或子 Agent 管理对象。通过 `execute_python`、`rlm.shell()`、`rlm.spawn()` 和 `agent_message.send()` 发出的操作可以被宿主校验和记录，但这些机制不能阻止 Kernel 中的任意 Python 代码。
 
-会话保存在 `.forge/sessions/<root-session-id>/`。日志采用追加式 JSONL；恢复时不会自动重放状态不确定的副作用。
+会话保存在实际运行 checkout 的 `.forge/sessions/<root-session-id>/`。默认 worktree 模式下，执行 `session list/show/resume` 时应将 `--workspace` 指向运行输出中的 checkout 路径。日志采用追加式 JSONL；恢复时不会自动重放状态不确定的副作用。
 
 ## 安全执行模型
 
@@ -156,6 +172,10 @@ flowchart LR
 5. 模拟测试和 reference 评测不能被描述为真实模型或真实容器证据。
 
 详细组件和数据流见 [架构文档](./docs/ARCHITECTURE.md) 与 [ADR](./docs/adr/)。
+
+## 并发编辑
+
+`forge run` 和 `forge rlm run` 默认使用独立 Git worktree，因此不同 Agent 运行以及人对源 checkout 的编辑各自在自己的工作副本内进行。Agent 不自动 commit、merge、删除或 push；请先用 `forge workspace diff <ID>` 审查，再手动提交和合并。显式 `--in-place` 时，工作区运行锁和补丁版本检查减少 ForgeAgent 之间的覆盖，但对不遵守 advisory lock 的编辑器仍无法提供绝对保护。完整行为及限制见[并发编辑指南](./docs/CONCURRENT_EDITING.md)。
 
 ## Provider 与配置
 
@@ -215,6 +235,7 @@ ForgeAgent/
 - [新手指南](./BEGINNER_GUIDE.md)
 - [模型配置](./MODEL_CONFIGURATION.md)
 - [安全策略](./SECURITY.md)
+- [并发编辑与独立工作区](./docs/CONCURRENT_EDITING.md)
 - [Docker 配置](./docs/DOCKER_SETUP.md)
 - [已知失败与边界](./docs/FAILURE_CASES.md)
 - [演示流程](./docs/DEMO.md)

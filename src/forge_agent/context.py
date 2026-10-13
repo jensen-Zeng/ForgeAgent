@@ -128,6 +128,15 @@ class ContextManager:
         metadata = {**result.metadata, "recoverability": recoverability}
         processed = result.model_copy(update={"metadata": metadata})
 
+        if call.name == "apply_patch" and error_code in {"stale_read", "concurrent_modification"}:
+            edits = call.arguments.get("edits")
+            if isinstance(edits, list):
+                for edit in edits:
+                    changed_path = edit.get("path") if isinstance(edit, dict) else None
+                    if isinstance(changed_path, str):
+                        # A legitimate re-read after an external save is new evidence.
+                        self._file_generations[changed_path] += 1
+
         if result.ok:
             generation = self._result_generation(call)
             digest = hashlib.sha256(

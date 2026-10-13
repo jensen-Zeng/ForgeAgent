@@ -208,7 +208,7 @@ class RuntimeEvalExecutor:
                 ListFilesTool(workspace),
                 ReadFileTool(workspace),
                 SearchCodeTool(workspace),
-                ApplyPatchTool(workspace),
+                ApplyPatchTool(workspace, require_read=True),
                 GitDiffTool(workspace),
                 GitStatusTool(workspace),
                 RunCommandTool(

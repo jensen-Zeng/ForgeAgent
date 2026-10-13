@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathspec import GitIgnoreSpec
 _ALWAYS_IGNORED_DIRS: Final = frozenset(
     {
         ".git",
+        ".forge",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
@@ -56,6 +58,17 @@ class Workspace:
         self.root = resolved
         self.respect_gitignore = respect_gitignore
         self._gitignore = self._load_root_gitignore()
+        self._read_versions: dict[str, str] = {}
+
+    def record_read(self, path: Path, raw: bytes) -> str:
+        """Bind a successful tool read to its exact on-disk bytes for this registry."""
+        digest = hashlib.sha256(raw).hexdigest()
+        self._read_versions[os.path.normcase(str(path.resolve()))] = digest
+        return digest
+
+    def read_version(self, path: Path) -> str | None:
+        """Return the last host-observed version; callers cannot forge this state."""
+        return self._read_versions.get(os.path.normcase(str(path.resolve())))
 
     def resolve(
         self,

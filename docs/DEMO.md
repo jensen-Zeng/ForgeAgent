@@ -1,6 +1,6 @@
 # End-to-end walkthrough
 
-This walkthrough demonstrates ForgeAgent's user-facing workflow and the evidence it produces. Use a small repository with no secrets, a clean Git state, and fast tests.
+This walkthrough demonstrates ForgeAgent's user-facing workflow and the evidence it produces. Use a small repository with no secrets, no tracked or staged changes (including under `.forge/`), no untracked files outside `.forge/`, and fast tests.
 
 ## Prepare
 
@@ -15,8 +15,8 @@ This walkthrough demonstrates ForgeAgent's user-facing workflow and the evidence
 .\.venv\Scripts\forge.exe config check
 .\.venv\Scripts\forge.exe doctor
 .\.venv\Scripts\forge.exe run "Fix the failing test with the smallest justified change" --workspace <demo-repository>
-git -C <demo-repository> diff --check
-git -C <demo-repository> diff
+forge workspace diff <worktree-id> --workspace <demo-repository>
+git -C <printed-checkout> diff --check
 ```
 
 Observe:
@@ -28,6 +28,11 @@ Observe:
 - final tests, diff, stop reason, usage, and cost-completeness flag;
 - redacted JSONL events for later inspection.
 
+The run creates a separate worktree from a committed Git root with no tracked or staged changes and no untracked files outside `.forge/`. Inspect the
+printed checkout and branch; the source files are not the Agent's output directory.
+Save editor buffers and review/commit selected changes before merging. See
+[concurrent editing](CONCURRENT_EDITING.md) for the integration workflow.
+
 If Docker is unavailable, reviewed commands under the default automatic backend return `sandbox_unavailable`; ForgeAgent does not silently run them on the host.
 
 ## Trusted RLM flow
@@ -36,7 +41,7 @@ Use this only with a repository you trust:
 
 ```powershell
 .\.venv\Scripts\forge.exe rlm run "Analyze the failures and delegate independent source and test inspection" --workspace <trusted-repository> --trust-workspace
-.\.venv\Scripts\forge.exe session show <session-id> --workspace <trusted-repository>
+.\.venv\Scripts\forge.exe session show <session-id> --workspace <printed-checkout>
 ```
 
 Inspect persistent kernel state, child lifecycle entries in `family.jsonl`, durable messages, shared usage, and compaction records. The trust flag starts a user-permission IPython kernel; it does not enable a sandbox.

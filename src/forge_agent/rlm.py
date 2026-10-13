@@ -25,6 +25,7 @@ from forge_agent.domain import (
 )
 from forge_agent.engine import LoopAgentEngine, TurnResult
 from forge_agent.kernel import HostBridge, KernelManager
+from forge_agent.locking import acquire_locks
 from forge_agent.messages import AgentMessageRouter
 from forge_agent.models import ModelProvider, ProviderError
 from forge_agent.session import InputEnvelope, SessionRuntime, SessionStore
@@ -94,36 +95,91 @@ class RLMApplication:
         self.provider = provider
         self.store = store
         self.registry_factory = registry_factory
-        self.stores: dict[UUID, SessionStore] = {store.header.session_id: store}
-        self.runtimes: dict[UUID, SessionRuntime] = {}
-        self.kernels: dict[UUID, KernelManager] = {}
-        self.bridges: dict[UUID, HostBridge] = {}
-        self.usage_ledger = UsageLedger(store)
-        self.root_runtime = self._make_runtime(store)
-        self.child_manager = ChildManager(
-            parent_store=store,
-            root_store=store,
-            runtime_factory=self._make_runtime,
-            max_depth=settings.rlm.max_depth,
-            max_concurrent=settings.rlm.max_concurrent_children,
-            overflow=settings.rlm.child_overflow,
-        )
-        # The root bridge was created before ChildManager; handlers resolve it lazily.
-        for session_store in tuple(self.stores.values()):
-            self._register_bridge_handlers(session_store)
+        self._ownership_context = acquire_locks([store.directory / "runtime-owner"], timeout=0)
+        self._ownership_held = False
+        self._shutdown_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
+        self._closed = False
+        self._shutdown_complete = False
+        self._ownership_context.__enter__()
+        self._ownership_held = True
+        try:
+            self.stores: dict[UUID, SessionStore] = {store.header.session_id: store}
+            self.runtimes: dict[UUID, SessionRuntime] = {}
+            self.kernels: dict[UUID, KernelManager] = {}
+            self.bridges: dict[UUID, HostBridge] = {}
+            self.usage_ledger = UsageLedger(store)
+            self.root_runtime = self._make_runtime(store)
+            self.child_manager = ChildManager(
+                parent_store=store,
+                root_store=store,
+                runtime_factory=self._make_runtime,
+                max_depth=settings.rlm.max_depth,
+                max_concurrent=settings.rlm.max_concurrent_children,
+                overflow=settings.rlm.child_overflow,
+            )
+            # The root bridge was created before ChildManager; handlers resolve it lazily.
+            for session_store in tuple(self.stores.values()):
+                self._register_bridge_handlers(session_store)
+        except BaseException:
+            self._release_ownership()
+            raise
 
     async def submit_and_run(self, task: str) -> tuple[TurnResult, ...]:
-        await self.root_runtime.submit(InputEnvelope(text=task))
-        return await self.root_runtime.run_until_idle()
+        self._ensure_open()
+        async with self._operation_lock:
+            self._ensure_open()
+            await self.root_runtime.submit(InputEnvelope(text=task))
+            self._ensure_open()
+            return await self.root_runtime.run_until_idle()
 
     async def resume(self) -> tuple[TurnResult, ...]:
-        return await self.root_runtime.run_until_idle()
+        self._ensure_open()
+        async with self._operation_lock:
+            self._ensure_open()
+            return await self.root_runtime.run_until_idle()
 
     async def shutdown(self) -> None:
-        await self.child_manager.cancel_all()
-        for kernel in tuple(self.kernels.values()):
-            await kernel.shutdown()
-        await self.provider.aclose()
+        async with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            if not self._closed:
+                self._closed = True
+                self.root_runtime.cancel("session_shutdown")
+            # Keep session ownership until any operation holding the root
+            # runtime has unwound and stopped appending to its journal.
+            async with self._operation_lock:
+                pass
+            errors: list[BaseException] = []
+            try:
+                try:
+                    await self.child_manager.cancel_all()
+                except BaseException as error:
+                    errors.append(error)
+                for kernel in tuple(self.kernels.values()):
+                    try:
+                        await kernel.shutdown()
+                    except BaseException as error:
+                        errors.append(error)
+                try:
+                    await self.provider.aclose()
+                except BaseException as error:
+                    errors.append(error)
+            finally:
+                self._release_ownership()
+                self._shutdown_complete = True
+            if errors:
+                raise errors[0]
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("session_closed")
+
+    def _release_ownership(self) -> None:
+        if self._ownership_held:
+            context = self._ownership_context
+            self._ownership_held = False
+            context.__exit__(None, None, None)
 
     def _make_runtime(self, store: SessionStore) -> SessionRuntime:
         def persist_kernel_event(kind: str, data: dict[str, object]) -> None:

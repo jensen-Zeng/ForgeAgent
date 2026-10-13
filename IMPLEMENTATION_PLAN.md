@@ -17,7 +17,7 @@ The project owns its runtime, provider-neutral domain models, tool protocol, per
 | --- | --- | --- |
 | Runtime | bounded model/tool loop, cancellation, stop reasons, streaming events | long-running real-provider soak tests |
 | Providers | OpenAI-compatible, Anthropic, Ollama, scriptable Faux provider | native Anthropic streaming and multi-provider live regression |
-| Repository tools | bounded listing, search, reads, exact patches, Git inspection | broader cross-platform repository corpus |
+| Repository tools | bounded listing, search, reads, exact patches, Git inspection, isolated worktrees by default, explicit in-place locking and stale-read detection | broader cross-platform repository corpus; external editors do not honor advisory locks |
 | Command safety | `SAFE / REVIEW / DENY`, approvals, environment filtering, Docker routing | Docker/WSL host isolation tests |
 | Observability | typed events, redaction, JSONL traces, usage and cost completeness | production telemetry export is intentionally out of scope |
 | Durable RLM | sessions, queues, repair, kernel bridge, children, messages, compaction | one budget-capped real-provider acceptance run |
@@ -56,6 +56,9 @@ The project owns its runtime, provider-neutral domain models, tool protocol, per
 - Make policy and backend selection host-owned and deterministic.
 - Fail closed when an operation requires Docker and the sandbox is unavailable.
 - Redact secrets before traces, errors, or artifacts are persisted.
+- Default new run entry points to a separate Git worktree; never silently stash, discard, or copy source working-tree changes.
+- For explicit in-place operation, require a host-observed read before patch, revalidate after approval under sorted advisory file locks, and force re-read/reapproval on conflicts.
+- Keep worktree review and integration explicit: no automatic commit, merge, deletion, or push. Treat worktrees as working-copy separation, never a sandbox.
 
 ### 5. Sessions and trusted RLM
 
@@ -73,6 +76,14 @@ The project owns its runtime, provider-neutral domain models, tool protocol, per
 - Update documentation metrics only after a complete local regression.
 
 ## Change workflow
+
+### Latest local verification snapshot (2026-10-13)
+
+- Environment: Windows, Python 3.12.9.
+- Full test suite: 264 passed; coverage: 87.02% (80% gate).
+- Ruff format/check, mypy (72 files), `pip check`, and `git diff --check`: passed.
+- Offline reference harness: 20/20; this validates the harness, not model quality. Offline wheel/sdist build passed.
+- These results are local and cover the current concurrency changes. They have not yet been exercised by GitHub CI; the historical CI result above reflects an earlier revision and must not be presented as validation of these changes.
 
 1. Inspect the worktree and identify unrelated user changes.
 2. Add or update focused tests before changing public schemas, configuration, CLI output, or security policy.
@@ -99,6 +110,8 @@ Additional gates:
 
 - no credentials, local session artifacts, generated reports, or target repositories in the package;
 - the safe and trusted execution modes remain visibly distinct;
+- isolated runs leave the source checkout unchanged, while in-place runs reject another ForgeAgent writer and detect stale patch bases;
+- workspace diff output is bounded and excludes sensitive files and symlinks; no worktree lifecycle command silently deletes or merges user work;
 - new external side effects have deterministic policy, approval, audit, and recovery behavior;
 - wheel and sdist install successfully in a clean environment;
 - documentation contains no machine-specific or unverifiable claims.
