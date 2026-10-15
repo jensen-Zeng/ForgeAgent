@@ -21,6 +21,10 @@ coverage.xml
 !.env.example
 forge.local.toml
 
+# Local maintainer instructions and implementation notes
+/AGENTS.md
+/IMPLEMENTATION_PLAN.md
+
 # Agent runtime data
 .forge/
 traces/

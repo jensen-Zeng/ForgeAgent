@@ -31,9 +31,8 @@ ForgeAgent 是一个运行在终端中的本地代码仓库 Agent。它把模型
 当前版本为 `0.3.0.dev0`，属于 Alpha 阶段。
 
 - 默认安全模式和可信 RLM 第一阶段已经完成离线实现。
-- 本地完整回归为 `264 passed`，覆盖率 `87.02%`，门禁为 80%（Windows / Python 3.12.9；2026-10-13）。
-- GitHub Actions 覆盖 Windows/Linux 与 Python 3.12/3.13。
-- 本次并发编辑改动尚未经过 GitHub Actions；上方 CI badge 和历史成功记录不代表这些改动已在 CI 中验证。
+- 本地完整回归为 `264 passed`，覆盖率 `87.02%`，门禁为 80%（Windows / Python 3.12.9；2026-10-15）。
+- GitHub Actions 配置了 Windows/Linux 与 Python 3.12/3.13 四个组合。代码提交 `391b28f` 的 [CI 结果](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/38357430262)中，两个 Windows 任务通过，两个 Linux 任务在 `locking.py` 的类型检查阶段失败，尚未运行后续测试；修复列入路线图。
 - RLM 测试使用真实本地 IPython Kernel，但模型为 Faux/Mock；这证明会话和桥接行为，不代表在线模型效果。
 - Docker 规格和自动路由已有测试，但真实隔离能力仍需在实际 Docker 宿主上验收。
 - 真实 Provider 的质量、兼容性和费用结论必须通过用户自己的服务配置和预算验证。
@@ -239,7 +238,8 @@ ForgeAgent/
 - [Docker 配置](./docs/DOCKER_SETUP.md)
 - [已知失败与边界](./docs/FAILURE_CASES.md)
 - [演示流程](./docs/DEMO.md)
-- [实施与发布计划](./IMPLEMENTATION_PLAN.md)
+- [贡献与发布检查](./CONTRIBUTING.md)
+- [实验与评测报告说明](./reports/README.md)
 - [未完成路线图](./docs/ROADMAP_PRIORITIES.md)
 - [变更记录](./CHANGELOG.md)
 

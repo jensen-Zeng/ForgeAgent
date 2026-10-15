@@ -1,6 +1,6 @@
 # Roadmap priorities
 
-Last updated: 2026-09-22
+Last updated: 2026-10-15
 Current development line: `0.3.0.dev0`
 
 This document contains only work that still needs implementation or external verification. Completed capabilities are described in the README, architecture, and changelog.
@@ -9,6 +9,7 @@ This document contains only work that still needs implementation or external ver
 
 | Item | Acceptance criteria |
 | --- | --- |
+| Linux CI type-check portability | Fix platform-specific typing in `locking.py`: Linux currently reports unused `type: ignore` comments for `os.getuid()` and missing `msvcrt` attributes. The [CI run for `391b28f`](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/38357430262) passed both Windows jobs but stopped both Linux jobs before tests. Require type checks and the full test suite to pass on Windows/Linux with Python 3.12/3.13. |
 | Real-provider RLM acceptance | With a provider-side hard spending limit, run one complete trusted RLM session; record session ID, provider/model, configuration revision, usage, known cost, completeness flag, stop reason, and failures. |
 | Docker host validation | Build the base image and verify no network, non-root execution, read-only root, minimal mounts, CPU/memory/PID limits, timeout cleanup, working directory behavior, and inability to read host credentials. |
 | Offline dependency image | Lock and review one Python target's dependencies, build a wheelhouse-derived image, and pass its tests without runtime network access. |

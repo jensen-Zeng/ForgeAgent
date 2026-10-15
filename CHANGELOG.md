@@ -6,6 +6,8 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 
 ### Changed
 
+- Kept maintainer handoff and implementation notes local; public contributor guidance now includes release checks.
+- Updated verification status with the Windows successes and Linux typing failures from the concurrency CI run, and clarified historical experiment/report evidence.
 - Reframed public documentation around ForgeAgent as an independent open-source product.
 - Consolidated architecture, implementation, security, and verification guidance.
 - `forge run` and `forge rlm run` now use an isolated Git worktree by default; use `--in-place` to explicitly share the selected checkout.
