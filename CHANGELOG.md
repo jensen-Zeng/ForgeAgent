@@ -15,6 +15,7 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 ### Fixed
 
 - Platform-specific file-lock typing that prevented Linux CI from reaching tests.
+- CI now installs into an isolated virtual environment, avoiding conflicts with hosted-runner global tools such as `pipx`.
 - Git read-only tools disable optional index writes, external diff/textconv, and fsmonitor, and reject paths using configured executable filters.
 
 ### Changed
