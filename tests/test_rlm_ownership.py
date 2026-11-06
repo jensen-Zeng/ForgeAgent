@@ -217,3 +217,68 @@ async def test_shutdown_waits_for_active_root_turn_and_leaves_pending_input_for_
     await resumed.shutdown()
     with acquire_locks([store.directory / "runtime-owner"], timeout=0):
         pass
+
+
+@pytest.mark.parametrize("cancel_mode", ["shutdown", "caller"])
+async def test_shutdown_cancels_compaction_before_starting_the_turn(
+    tmp_path: Path, cancel_mode: str
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cleaned_up = asyncio.Event()
+
+    class BlockingSummaryProvider(FakeModelProvider):
+        async def generate(self, request: ModelRequest) -> ModelResponse:
+            del request
+            entered.set()
+            try:
+                await release.wait()
+                return ModelResponse(content=(TextPart(text="summary"),))
+            finally:
+                cleaned_up.set()
+
+    store = SessionStore.create(tmp_path)
+    provider = BlockingSummaryProvider([])
+    application = RLMApplication(
+        settings=load_settings(
+            cwd=tmp_path,
+            cli_overrides={
+                "context": {"window_tokens": 100, "reserve_tokens": 20, "keep_recent_tokens": 10}
+            },
+            environ={},
+        ),
+        provider=provider,
+        store=store,
+        registry_factory=ToolRegistry,
+    )
+    first = InputEnvelope(text="first task")
+    pending = InputEnvelope(kind=InputKind.FOLLOW_UP, text="pending task")
+    await application.root_runtime.submit(first)
+    await application.root_runtime.submit(pending)
+    active_turn = asyncio.create_task(application.resume())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        if cancel_mode == "shutdown":
+            await asyncio.wait_for(application.shutdown(), timeout=2)
+            results = await active_turn
+            assert len(results) == 1
+            assert results[0].status.value == "cancelled"
+        else:
+            active_turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await active_turn
+            await application.shutdown()
+        assert cleaned_up.is_set()
+        assert provider.requests == []
+        assert provider.closed
+        started = [
+            entry.payload["input_id"] for entry in store.replay() if entry.type == "input_started"
+        ]
+        assert started == [str(first.id)]
+        assert application.root_runtime.busy is False
+        with acquire_locks([store.directory / "runtime-owner"], timeout=0):
+            pass
+    finally:
+        release.set()
+        await asyncio.gather(active_turn, return_exceptions=True)
+        await application.shutdown()

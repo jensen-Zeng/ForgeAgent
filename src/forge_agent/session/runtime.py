@@ -184,9 +184,13 @@ class SessionRuntime:
         else:
             context = ConversationContext.start(config, session_id=self.session_id)
             messages = context.messages
+        scope = self._scope or CancellationScope()
         if self.context_builder is not None:
             try:
-                messages = await self.context_builder.prepare(messages)
+                messages = await scope.run(self.context_builder.prepare(messages))
+            except asyncio.CancelledError:
+                if not scope.cancelled:
+                    raise
             except CompactionFailedError as error:
                 return TurnResult(
                     session_id=self.session_id,
@@ -198,6 +202,14 @@ class SessionRuntime:
                     error_type=type(error).__name__,
                     error_message=str(error),
                 )
+        if scope.cancelled:
+            return TurnResult(
+                session_id=self.session_id,
+                status=RunStatus.CANCELLED,
+                stop_reason=TurnStopReason.CANCELLED,
+                run_stop_reason=StopReason.USER_CANCELLED,
+                messages=messages,
+            )
         context = ConversationContext(
             session_id=self.session_id,
             messages=messages,
@@ -208,7 +220,7 @@ class SessionRuntime:
             context,
             self.tools,
             self._event_sink,
-            self._scope or CancellationScope(),
+            scope,
         )
 
     def _event_sink(self, kind: EventKind, data: dict[str, object]) -> None:
