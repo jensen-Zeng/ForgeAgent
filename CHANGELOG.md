@@ -14,6 +14,9 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 
 ### Fixed
 
+- Cancellation now waits for owned model/tool operations to finish cleanup before returning, including cancelled child sessions.
+- Boundary cancellation retains completed tool results and avoids starting another model request.
+- Context compression invalidates duplicate-result references to observations that are no longer available in full.
 - Platform-specific file-lock typing that prevented Linux CI from reaching tests.
 - CI now installs into an isolated virtual environment, avoiding conflicts with hosted-runner global tools such as `pipx`.
 - Git read-only tools disable optional index writes, external diff/textconv, and fsmonitor, and reject paths using configured executable filters.

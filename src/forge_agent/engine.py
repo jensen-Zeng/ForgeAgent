@@ -59,8 +59,12 @@ class CancellationScope:
                 task.cancel()
             return await task
         finally:
+            # The caller may cancel while asyncio.wait still owns the operation.
+            # Finish its cleanup before session resources can be released.
+            if not task.done():
+                task.cancel()
             waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
+            await asyncio.gather(task, waiter, return_exceptions=True)
 
 
 class TurnStopReason(StrEnum):
