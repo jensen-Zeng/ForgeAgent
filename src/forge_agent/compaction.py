@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from forge_agent.domain import Message, ModelRequest, Role, TextPart, ToolCallPart, ToolResultPart
 from forge_agent.models import ModelProvider
-from forge_agent.session.store import SessionStore
+
+if TYPE_CHECKING:
+    from forge_agent.session.store import SessionStore
 
 _SECTIONS = (
     "Goal",
@@ -163,6 +166,8 @@ def _render_message(message: Message, *, max_tool_result_chars: int | None = Non
         elif isinstance(part, ToolResultPart):
             result = part.tool_result
             output = result.output
+            if result.error:
+                output = f"{result.error}\n{output}"
             if max_tool_result_chars is not None and len(output) > max_tool_result_chars:
                 output = output[:max_tool_result_chars] + "...[truncated for compaction]"
             parts.append(f"TOOL_RESULT {result.name} {result.call_id} ok={result.ok} {output}")
