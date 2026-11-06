@@ -297,9 +297,11 @@ def test_search_falls_back_when_rg_fails(
     assert result.metadata["backend"] == "python_fallback"
 
 
+@pytest.mark.parametrize("binary_field", [None, "path", "lines"])
 def test_rg_json_output_is_parsed_without_shell(
     sample_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
+    binary_field: str | None,
 ) -> None:
     match_record = {
         "type": "match",
@@ -310,6 +312,11 @@ def test_rg_json_output_is_parsed_without_shell(
             "submatches": [{"start": 17, "end": 27}],
         },
     }
+    records = [match_record]
+    if binary_field is not None:
+        binary_record = json.loads(json.dumps(match_record))
+        binary_record["data"][binary_field] = {"bytes": "/w=="}
+        records.insert(0, binary_record)
 
     def fake_rg(
         command: list[str],
@@ -320,15 +327,17 @@ def test_rg_json_output_is_parsed_without_shell(
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps(match_record) + "\n",
+            stdout="\n".join(json.dumps(record) for record in records) + "\n",
             stderr="",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_rg)
     tool = SearchCodeTool(Workspace(sample_repo), rg_executable="rg")
 
-    result = tool.execute(call("search_code", query="ForgeAgent"))
+    result = tool.execute(call("search_code", query="ForgeAgent", max_results=1))
 
     assert result.ok is True
     assert "src/main.py:2:18:" in result.output
     assert result.metadata["backend"] == "rg"
+    assert result.metadata["count"] == 1
+    assert result.metadata["truncated"] is False

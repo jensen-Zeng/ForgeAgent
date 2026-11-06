@@ -311,7 +311,12 @@ class SearchCodeTool(BaseTool[SearchCodeParameters]):
             if record.get("type") != "match":
                 continue
             data = record["data"]
-            relative_path = Path(data["path"]["text"])
+            path_text = data["path"].get("text")
+            line_text = data["lines"].get("text")
+            # Ripgrep uses base64 bytes fields for text that is not valid UTF-8.
+            if not isinstance(path_text, str) or not isinstance(line_text, str):
+                continue
+            relative_path = Path(path_text)
             absolute_path = (self._workspace.root / relative_path).resolve(strict=False)
             if (
                 not self._workspace.is_within_root(absolute_path)
@@ -320,7 +325,7 @@ class SearchCodeTool(BaseTool[SearchCodeParameters]):
             ):
                 continue
             line_number = int(data["line_number"])
-            line_text = str(data["lines"]["text"]).rstrip("\r\n")
+            line_text = line_text.rstrip("\r\n")
             submatches = data.get("submatches", [])
             column = int(submatches[0]["start"]) + 1 if submatches else 1
             display = self._workspace.display_path(absolute_path)

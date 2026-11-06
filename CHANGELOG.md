@@ -14,6 +14,7 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 
 ### Fixed
 
+- Ripgrep searches skip byte-encoded non-UTF-8 matches without losing valid text results or reporting a tool failure.
 - Session compaction includes tool error details in its summary input, and its module can be imported independently of session initialization.
 - Failed Python kernel calls retain bounded stdout, traceback, and artifact references, and provider message conversion preserves failure output alongside the error.
 - OpenAI-compatible streaming preserves cached-token pricing and derives missing totals consistently with non-streaming responses; malformed usage returns a provider error.
