@@ -166,6 +166,15 @@ class AgentRuntime:
         started_monotonic: float,
     ) -> RunResult:
         while True:
+            if self._boundary_cancelled():
+                return self._finish(
+                    config,
+                    state,
+                    status=RunStatus.CANCELLED,
+                    reason=StopReason.USER_CANCELLED,
+                    started_at=started_at,
+                    started_monotonic=started_monotonic,
+                )
             if state.steps >= config.budget.max_steps:
                 return self._finish(
                     config,
@@ -262,7 +271,7 @@ class AgentRuntime:
                 )
 
             tool_results: list[ToolResultPart] = []
-            for call in response.tool_calls:
+            for call_index, call in enumerate(response.tool_calls):
                 if self._boundary_cancelled():
                     cancelled = tuple(
                         ToolResultPart(
@@ -274,9 +283,11 @@ class AgentRuntime:
                                 metadata={"error_code": "turn_steered"},
                             )
                         )
-                        for pending in response.tool_calls
+                        for pending in response.tool_calls[call_index:]
                     )
-                    state.messages.append(Message(role=Role.TOOL, content=cancelled))
+                    state.messages.append(
+                        Message(role=Role.TOOL, content=(*tool_results, *cancelled))
+                    )
                     return self._finish(
                         config,
                         state,

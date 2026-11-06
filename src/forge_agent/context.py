@@ -70,6 +70,7 @@ class ContextManager:
         self._preserve_recent = preserve_recent_messages
         self._read_only = read_only
         self._plan: TaskPlan
+        self._seen_results: dict[str, str]
         self._reset()
 
     @property
@@ -198,6 +199,7 @@ class ContextManager:
         boundary = max(len(messages) - self._preserve_recent, 0)
         optimized = list(messages)
         changed = False
+        compressed_call_ids: set[str] = set()
         for index in range(boundary):
             message = optimized[index]
             if message.role is not Role.TOOL:
@@ -229,11 +231,18 @@ class ContextManager:
                         )
                     )
                 )
+                compressed_call_ids.add(result.call_id)
                 message_changed = True
             if message_changed:
                 optimized[index] = Message(role=Role.TOOL, content=tuple(parts))
                 changed = True
         if changed:
+            # A reference to a compressed observation can no longer recover its content.
+            self._seen_results = {
+                digest: call_id
+                for digest, call_id in self._seen_results.items()
+                if call_id not in compressed_call_ids
+            }
             self._compressions += 1
             self._estimated_tokens = self.estimate_tokens(optimized, tools)
         return optimized
@@ -291,7 +300,7 @@ class ContextManager:
         return "\n".join(lines)
 
     def _reset(self) -> None:
-        self._seen_results: dict[str, str] = {}
+        self._seen_results = {}
         self._file_generations: Counter[str] = Counter()
         self._file_reads: Counter[str] = Counter()
         self._call_counts: Counter[str] = Counter()

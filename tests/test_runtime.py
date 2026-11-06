@@ -23,6 +23,7 @@ from forge_agent.domain import (
     ToolCall,
     ToolCallPart,
     ToolResult,
+    ToolResultPart,
     Usage,
 )
 from forge_agent.models import FakeModelProvider, ProviderResponseError
@@ -196,6 +197,47 @@ async def test_multiple_tool_calls_execute_in_response_order(tmp_path: Path) -> 
     assert result.status is RunStatus.COMPLETED
     assert seen == ["first", "second"]
     assert result.metrics.tool_calls == 2
+
+
+@pytest.mark.parametrize(("requested_calls", "cancel_after"), ((2, 0), (2, 1), (1, 1), (2, 2)))
+@pytest.mark.asyncio
+async def test_boundary_cancellation_preserves_executed_results_and_stops_next_request(
+    tmp_path: Path,
+    requested_calls: int,
+    cancel_after: int,
+) -> None:
+    seen: list[str] = []
+    calls = tuple(
+        call(f"call-{index}", "record", value=str(index)) for index in range(requested_calls)
+    )
+    provider = FakeModelProvider((tool_response(*calls), text_response()))
+
+    result = await AgentRuntime(
+        provider=provider,
+        tools=ToolRegistry((RecordingTool(seen),)),
+        boundary_cancelled=lambda: len(seen) >= cancel_after,
+    ).run(run_config(tmp_path))
+
+    assert result.status is RunStatus.CANCELLED
+    assert seen == [str(index) for index in range(cancel_after)]
+    assert result.metrics.tool_calls == cancel_after
+    assert len(provider.requests) == (0 if cancel_after == 0 else 1)
+    observations = [
+        part.tool_result
+        for message in result.messages
+        for part in message.content
+        if isinstance(part, ToolResultPart)
+    ]
+    if cancel_after == 0:
+        assert observations == []
+        return
+    assert [item.call_id for item in observations] == [item.id for item in calls]
+    for index, observation in enumerate(observations):
+        assert observation.ok is (index < cancel_after)
+        if observation.ok:
+            assert observation.output == str(index)
+        else:
+            assert observation.metadata["error_code"] == "turn_steered"
 
 
 @pytest.mark.parametrize(

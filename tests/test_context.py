@@ -22,7 +22,7 @@ from forge_agent.domain import (
 )
 from forge_agent.models import FakeModelProvider
 from forge_agent.runtime import AgentRuntime
-from forge_agent.tools import ListFilesTool, ToolRegistry, Workspace
+from forge_agent.tools import ListFilesTool, ReadFileTool, ToolRegistry, Workspace
 
 
 def call(call_id: str, name: str, **arguments: object) -> ToolCall:
@@ -148,6 +148,40 @@ def test_old_successful_observations_are_compressed_near_budget(
     assert compressed.metadata["context_compressed"] is True
     assert manager.snapshot().compressions == 1
     assert manager.snapshot().estimated_tokens < manager.estimate_tokens(messages, ())
+
+
+@pytest.mark.asyncio
+async def test_reread_restores_file_content_after_compression(tmp_path: Path) -> None:
+    content = "IMPORTANT_VALUE = 42\n" + "# Context for the task\n" * 30
+    (tmp_path / "app.py").write_text(content, encoding="utf-8")
+    calls = (
+        call("read-1", "read_file", path="app.py"),
+        call("list-1", "list_files", path="."),
+        call("read-2", "read_file", path="app.py"),
+    )
+    provider = FakeModelProvider(
+        (
+            *(ModelResponse(content=(ToolCallPart(tool_call=item),)) for item in calls),
+            ModelResponse(content=(TextPart(text="Inspected"),)),
+        )
+    )
+    workspace = Workspace(tmp_path)
+    result = await AgentRuntime(
+        provider=provider,
+        tools=ToolRegistry((ReadFileTool(workspace), ListFilesTool(workspace))),
+        context_manager=ContextManager(workspace, max_tokens=100, preserve_recent_messages=2),
+    ).run(RunConfig(task="Inspect the file twice", workspace=tmp_path))
+
+    assert result.status is RunStatus.COMPLETED
+    observations = {
+        part.tool_result.call_id: part.tool_result
+        for message in provider.requests[-1].messages
+        for part in message.content
+        if isinstance(part, ToolResultPart)
+    }
+    assert observations["read-1"].metadata["context_compressed"] is True
+    assert "IMPORTANT_VALUE = 42" in observations["read-2"].output
+    assert "context_deduplicated" not in observations["read-2"].metadata
 
 
 def test_failed_observations_are_preserved_during_compression(tmp_path: Path) -> None:
