@@ -122,6 +122,7 @@ class AnthropicProvider(HttpModelProvider):
         text_chunks: list[str] = []
         blocks: dict[int, dict[str, str]] = {}
         input_tokens = output_tokens = cached_tokens = 0
+        saw_input_usage = saw_output_usage = False
         finish_reason: str | None = None
         request_id: str | None = None
         saw_start = saw_stop = False
@@ -134,8 +135,9 @@ class AnthropicProvider(HttpModelProvider):
             "Accept": "text/event-stream",
         }
 
-        def apply_usage(raw: object) -> None:
+        def apply_usage(raw: object, *, final: bool = False) -> None:
             nonlocal input_tokens, output_tokens, cached_tokens
+            nonlocal saw_input_usage, saw_output_usage
             if not isinstance(raw, dict):
                 return
             for key in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
@@ -146,8 +148,10 @@ class AnthropicProvider(HttpModelProvider):
                     raise ProviderResponseError("Anthropic stream returned invalid usage")
             if isinstance(raw.get("input_tokens"), int):
                 input_tokens = raw["input_tokens"]
+                saw_input_usage = True
             if isinstance(raw.get("output_tokens"), int):
                 output_tokens = raw["output_tokens"]
+                saw_output_usage = saw_output_usage or final
             if isinstance(raw.get("cache_read_input_tokens"), int):
                 cached_tokens = raw["cache_read_input_tokens"]
 
@@ -265,7 +269,7 @@ class AnthropicProvider(HttpModelProvider):
                 delta = item.get("delta")
                 if isinstance(delta, dict) and isinstance(delta.get("stop_reason"), str):
                     finish_reason = delta["stop_reason"]
-                apply_usage(item.get("usage"))
+                apply_usage(item.get("usage"), final=True)
             elif kind == "message_stop":
                 if saw_stop:
                     raise ProviderResponseError("Anthropic stream repeated message_stop")
@@ -361,14 +365,14 @@ class AnthropicProvider(HttpModelProvider):
                 )
         if not parts:
             raise ProviderResponseError("Anthropic stream returned no text or tool calls")
-        usage = self._price_usage(
-            Usage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_input_tokens=cached_tokens,
-            ),
-            cached_tokens_included_in_input=False,
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_tokens,
         )
+        # Missing counters are unknown costs, not reported zero usage.
+        if saw_input_usage and saw_output_usage:
+            usage = self._price_usage(usage, cached_tokens_included_in_input=False)
         normalized = ModelResponse(
             content=tuple(parts),
             usage=usage,

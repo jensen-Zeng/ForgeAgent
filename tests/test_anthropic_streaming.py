@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -141,6 +142,85 @@ async def test_stream_aggregates_text_tool_json_and_usage() -> None:
     assert final.tool_calls[0].arguments == {"key": "value"}
     assert final.usage.input_tokens == 12 and final.usage.output_tokens == 9
     assert final.usage.cached_input_tokens == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_usage", "final_usage", "expected_cost"),
+    [
+        (None, None, None),
+        ({}, {}, None),
+        ({"input_tokens": 12}, {}, None),
+        ({}, {"output_tokens": 9}, None),
+        ({"input_tokens": 12, "output_tokens": 1}, None, None),
+        ({"input_tokens": 0}, {"output_tokens": 0}, Decimal("0")),
+        (
+            {"input_tokens": 12, "output_tokens": 1, "cache_read_input_tokens": 4},
+            {"output_tokens": 9},
+            Decimal("0.000079"),
+        ),
+    ],
+    ids=[
+        "missing",
+        "empty",
+        "input-only",
+        "output-only",
+        "initial-only",
+        "reported-zero",
+        "cumulative",
+    ],
+)
+async def test_stream_prices_only_reported_input_and_output_usage(
+    initial_usage: dict[str, int] | None,
+    final_usage: dict[str, int] | None,
+    expected_cost: Decimal | None,
+) -> None:
+    body = "".join(
+        (
+            frame(
+                "message_start",
+                {"type": "message_start", "message": {"id": "x", "usage": initial_usage}},
+            ),
+            frame(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": "hello"},
+                },
+            ),
+            frame("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            frame(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": final_usage,
+                },
+            ),
+            frame("message_stop", {"type": "message_stop"}),
+        )
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))
+    ) as client:
+        p = AnthropicProvider(
+            model_name="test-model",
+            api_key="secret",
+            base_url="https://anthropic.example/v1",
+            client=client,
+            input_cost_per_million=Decimal("2"),
+            output_cost_per_million=Decimal("5"),
+            cached_input_cost_per_million=Decimal("2.5"),
+        )
+        events = [event async for event in p.stream(request())]
+    final = events[-1].response
+    assert final is not None
+    assert final.usage.cost == expected_cost
+    assert final.usage.input_tokens == (initial_usage or {}).get("input_tokens", 0)
+    assert final.usage.output_tokens == (final_usage or {}).get(
+        "output_tokens", (initial_usage or {}).get("output_tokens", 0)
+    )
 
 
 @pytest.mark.asyncio
