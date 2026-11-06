@@ -13,6 +13,7 @@ from forge_agent.domain import (
     TextPart,
     ToolCall,
     ToolCallPart,
+    ToolResult,
     ToolResultPart,
     ToolSchema,
 )
@@ -105,6 +106,13 @@ class AnthropicMessageResponse(WireModel):
     usage: AnthropicUsage | None = None
 
 
+def _tool_result_text(result: ToolResult) -> str:
+    if result.ok:
+        return result.output
+    error = result.error or "Tool failed"
+    return f"{error}\n{result.output}" if result.output else error
+
+
 def openai_messages(messages: tuple[Message, ...]) -> list[dict[str, JsonValue]]:
     """Convert normalized history to Chat Completions message objects."""
     converted: list[dict[str, JsonValue]] = []
@@ -113,12 +121,11 @@ def openai_messages(messages: tuple[Message, ...]) -> list[dict[str, JsonValue]]
             for part in message.content:
                 if isinstance(part, ToolResultPart):
                     result = part.tool_result
-                    content = result.output if result.ok else result.error or "Tool failed"
                     converted.append(
                         {
                             "role": "tool",
                             "tool_call_id": result.call_id,
-                            "content": content,
+                            "content": _tool_result_text(result),
                         }
                     )
             continue
@@ -185,9 +192,7 @@ def anthropic_messages(
                         {
                             "type": "tool_result",
                             "tool_use_id": result.call_id,
-                            "content": result.output
-                            if result.ok
-                            else result.error or "Tool failed",
+                            "content": _tool_result_text(result),
                             "is_error": not result.ok,
                         }
                     )

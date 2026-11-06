@@ -80,7 +80,7 @@ class ExecutePythonTool:
             call_id=call.id,
             name=call.name,
             ok=result.ok,
-            output="\n".join(output_parts) if result.ok else "",
+            output="\n".join(output_parts),
             error=None if result.ok else "Kernel execution failed",
             metadata={
                 "timed_out": result.timed_out,
