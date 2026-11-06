@@ -71,7 +71,24 @@ def test_run_does_not_invoke_a_shell(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert observed["shell"] is False
 
 
-def test_timeout_is_a_structured_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected_stdout", "expected_stderr"),
+    [
+        ("partial", "late", "partial", "late"),
+        ("完成".encode(), b"late\xff", "完成", "late\ufffd"),
+        (None, None, "", ""),
+        ("x" * 100_001, b"y" * 100_001, "x" * 100_000, "y" * 100_000),
+    ],
+    ids=["text", "bytes", "empty", "bounded"],
+)
+def test_timeout_is_a_structured_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+    expected_stdout: str,
+    expected_stderr: str,
+) -> None:
     calls: list[list[str]] = []
 
     def time_out(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -79,7 +96,7 @@ def test_timeout_is_a_structured_result(tmp_path: Path, monkeypatch: pytest.Monk
         calls.append(command)
         if command[1:3] == ["rm", "--force"]:
             return subprocess.CompletedProcess(command, 0, "", "")
-        raise subprocess.TimeoutExpired("docker", 1, output="partial", stderr="late")
+        raise subprocess.TimeoutExpired("docker", 1, output=stdout, stderr=stderr)
 
     monkeypatch.setattr(subprocess, "run", time_out)
     sandbox = DockerSandbox(
@@ -91,7 +108,8 @@ def test_timeout_is_a_structured_result(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert result.timed_out is True
     assert result.exit_code == -1
-    assert result.stdout == "partial"
+    assert result.stdout == expected_stdout
+    assert result.stderr == expected_stderr
     assert calls[0][0:2] == ["docker", "run"]
     assert calls[1][0:3] == ["docker", "rm", "--force"]
     assert calls[1][-1].startswith("forge-agent-")

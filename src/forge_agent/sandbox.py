@@ -58,6 +58,13 @@ class SandboxResult(BaseModel):
     timed_out: bool
 
 
+def _bounded_output(value: str | bytes | None) -> str:
+    # TimeoutExpired may retain raw bytes even when subprocess uses text mode.
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return (value or "")[-100_000:]
+
+
 class DockerSandbox:
     """Build and optionally run the exact hardened Docker command."""
 
@@ -159,8 +166,8 @@ class DockerSandbox:
             self._force_remove(container_name)
             return SandboxResult(
                 exit_code=-1,
-                stdout=(error.stdout or "") if isinstance(error.stdout, str) else "",
-                stderr=(error.stderr or "") if isinstance(error.stderr, str) else "",
+                stdout=_bounded_output(error.stdout),
+                stderr=_bounded_output(error.stderr),
                 timed_out=True,
             )
         except OSError as error:
@@ -169,8 +176,8 @@ class DockerSandbox:
             ) from error
         return SandboxResult(
             exit_code=completed.returncode,
-            stdout=completed.stdout[-100_000:],
-            stderr=completed.stderr[-100_000:],
+            stdout=_bounded_output(completed.stdout),
+            stderr=_bounded_output(completed.stderr),
             timed_out=False,
         )
 
