@@ -26,7 +26,7 @@ from forge_agent.engine import (
     TurnStopReason,
 )
 from forge_agent.session.models import AcceptedInput, InputEnvelope, InputKind
-from forge_agent.session.store import SessionStore
+from forge_agent.session.store import SessionCorruptError, SessionStore
 from forge_agent.tools import ToolRegistry
 from forge_agent.tracing import EventKind
 
@@ -231,6 +231,11 @@ class SessionRuntime:
                 self._event_observer(kind, data)
 
     def _recover(self) -> None:
+        if not self.store.inspect_tail().valid:
+            raise SessionCorruptError(
+                "session tail requires explicit repair before resuming; "
+                "use forge session repair --truncate-tail"
+            )
         inputs: list[tuple[int, InputEnvelope]] = []
         consumed: set[UUID] = set()
         started: set[UUID] = set()

@@ -36,6 +36,7 @@ from forge_agent.rlm import RLMApplication
 from forge_agent.runtime import AgentRuntime
 from forge_agent.sandbox import configured_docker_sandbox
 from forge_agent.session import SessionStore
+from forge_agent.session.store import SessionCorruptError
 from forge_agent.tools import (
     ApplyPatchTool,
     GitDiffTool,
@@ -395,7 +396,7 @@ def _resume_rlm_workspace(settings: ForgeSettings, session_id: str) -> None:
     try:
         store = SessionStore.open(settings.workspace.allowed_root, session_id)
         provider = _create_live_provider(settings.model)
-    except (ConfigurationError, FileNotFoundError, ValueError) as error:
+    except (ConfigurationError, FileNotFoundError, ValueError, SessionCorruptError) as error:
         _configuration_failure(ConfigurationError(str(error)))
     try:
         application = RLMApplication(
@@ -456,7 +457,7 @@ def session_list_command(
             try:
                 store = SessionStore.open(workspace, directory.name)
                 tail = store.inspect_tail()
-            except (OSError, ValueError):
+            except (OSError, ValueError, SessionCorruptError):
                 continue
             table.add_row(
                 str(store.header.session_id),
@@ -475,7 +476,7 @@ def session_show_command(
     try:
         store = SessionStore.open(workspace, session_id)
         entries = store.replay()
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SessionCorruptError) as error:
         console.print(f"[red]Unable to open session:[/red] {error}")
         raise typer.Exit(code=EXIT_CONFIGURATION) from None
     counts: dict[str, int] = {}
@@ -518,7 +519,7 @@ def session_repair_command(
         ):
             before = store.inspect_tail()
             after = store.repair_tail(truncate_tail=truncate_tail)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SessionCorruptError) as error:
         console.print(f"[red]Unable to repair session:[/red] {error}")
         raise typer.Exit(code=EXIT_CONFIGURATION) from None
     console.print(f"Before: {before.model_dump_json()}")

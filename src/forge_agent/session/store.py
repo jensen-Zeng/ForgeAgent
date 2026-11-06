@@ -174,6 +174,11 @@ class SessionStore:
                 decoded = line.decode("utf-8")
                 json.loads(decoded)
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                if index < len(lines) - 1:
+                    raise SessionCorruptError(
+                        f"invalid JSONL line {index + 1} before the final line; "
+                        "refusing tail repair that would discard later records"
+                    ) from error
                 return TailInspection(
                     valid=False,
                     last_good_offset=last_good,

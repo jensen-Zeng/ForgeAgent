@@ -28,7 +28,7 @@ OpenAI-compatible 服务可能返回截断 JSON、数组或缺失 `arguments`，
 
 ## 7. 崩溃恢复不能猜测副作用
 
-如果进程在工具、child 或 Kernel 操作执行期间退出，JSONL 可能只有开始事件而没有可靠终态。自动重放可能重复写文件、安装包或调用外部服务，因此恢复逻辑把这类操作标为 `interrupted/uncertain`，只继续从未开始的持久输入。半写 JSONL 尾行也只报告 `last_good_offset`，必须由用户显式执行 `forge session repair ... --truncate-tail`。
+如果进程在工具、child 或 Kernel 操作执行期间退出，JSONL 可能只有开始事件而没有可靠终态。自动重放可能重复写文件、安装包或调用外部服务，因此恢复逻辑把这类操作标为 `interrupted/uncertain`，只继续从未开始的持久输入。半写或无效的 JSONL 尾行会阻止恢复，必须由用户显式执行 `forge session repair ... --truncate-tail` 后才能继续写入恢复记录。如果损坏行后仍有其他记录，尾部修复会拒绝截断，保留原文件供人工检查。
 
 ## 8. Windows 验证不能代替 Linux 类型检查
 
