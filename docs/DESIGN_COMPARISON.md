@@ -31,6 +31,6 @@ Streaming providers still produce one authoritative completed response before an
 ## Evidence and remaining limits
 
 - Offline tests cover read-only tool exclusion, scoped instructions, SSE aggregation/error/cancellation, early progress, and persisted tool lifecycle correlation.
-- Cross-platform CI remains the authority for Windows/Linux execution; local type checks alone are not Linux runtime evidence.
+- Local regression: 299 tests passed, 86.91% coverage (Windows / Python 3.12.9). The [CI run for `999edd9`](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/42251334137) passed all four Windows/Linux × Python 3.12/3.13 jobs. Wheel/sdist build and metadata checks passed; these are implementation checks, not model-quality scores.
 - No live model comparison or spending-limit test is claimed. Real-provider acceptance and Docker host validation remain in the [roadmap](ROADMAP_PRIORITIES.md).
 - MCP, IDE/TUI integration, persistent global memory, and supervisor/worker scheduling remain measurement-driven extensions. They are not required to validate these changes.

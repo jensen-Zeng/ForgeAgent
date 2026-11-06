@@ -34,7 +34,7 @@ ForgeAgent 是一个运行在终端中的本地代码仓库 Agent。它把模型
 
 - 默认安全模式和可信 RLM 第一阶段已经完成离线实现。
 - 本地完整回归为 `299 passed`，覆盖率 `86.91%`，门禁为 80%（Windows / Python 3.12.9；2026-11-07）。
-- GitHub Actions 配置了 Windows/Linux 与 Python 3.12/3.13 四个组合。本轮修复了此前阻断 Linux CI 的文件锁类型检查，Windows/Linux mypy 已在本地通过；四组合运行结果以 [CI](https://github.com/jensen-Zeng/ForgeAgent/actions/workflows/ci.yml) 为准。
+- 提交 `999edd9` 的 [GitHub Actions](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/42251334137) 四个组合全部通过：Windows/Linux × Python 3.12/3.13。CI 使用独立虚拟环境，避免 runner 全局工具与项目依赖冲突。
 - RLM 测试使用真实本地 IPython Kernel，但模型为 Faux/Mock；这证明会话和桥接行为，不代表在线模型效果。
 - Docker 规格和自动路由已有测试，但真实隔离能力仍需在实际 Docker 宿主上验收。
 - 真实 Provider 的质量、兼容性和费用结论必须通过用户自己的服务配置和预算验证。
