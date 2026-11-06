@@ -34,6 +34,7 @@ from forge_agent.tracing import EventKind, RunTracer, Visibility
 
 MonotonicClock = Callable[[], float]
 WallClock = Callable[[], datetime]
+RuntimeEventSink = Callable[[EventKind, dict[str, JsonValue]], None]
 
 
 def utc_now() -> datetime:
@@ -68,6 +69,7 @@ class AgentRuntime:
         wall_clock: WallClock = utc_now,
         streaming: bool = False,
         boundary_cancelled: Callable[[], bool] | None = None,
+        event_sink: RuntimeEventSink | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -77,6 +79,10 @@ class AgentRuntime:
         self._wall_clock = wall_clock
         self._streaming = streaming
         self._boundary_cancelled = boundary_cancelled or (lambda: False)
+        self._event_sink = event_sink
+        self._stream_text_chars = 0
+        self._stream_argument_chars = 0
+        self._stream_last_progress: float | None = None
 
     async def run(
         self,
@@ -182,6 +188,9 @@ class AgentRuntime:
                 visibility=Visibility.USER,
             )
             try:
+                self._stream_text_chars = 0
+                self._stream_argument_chars = 0
+                self._stream_last_progress = None
                 request = ModelRequest(
                     messages=tuple(state.messages),
                     tools=self._tools.schemas,
@@ -309,20 +318,31 @@ class AgentRuntime:
     def _observe_stream(self, event: object) -> None:
         from forge_agent.domain import ModelStreamEvent, ModelStreamEventType
 
-        if not isinstance(event, ModelStreamEvent) or self._tracer is None:
+        if not isinstance(event, ModelStreamEvent):
             return
         if event.type is ModelStreamEventType.COMPLETED:
             return
+        self._stream_text_chars += len(event.text or "")
+        self._stream_argument_chars += len(event.arguments_delta or "")
+        now = self._monotonic()
+        if self._stream_last_progress is not None and now - self._stream_last_progress < 1:
+            return
+        self._stream_last_progress = now
+        # Raw fragments cannot be safely redacted independently: a credential can
+        # span several deltas. Publish bounded progress, not partial model text.
         self._emit(
             EventKind.MODEL_DELTA,
+            summary=(
+                f"Receiving model output: {self._stream_text_chars} text characters, "
+                f"{self._stream_argument_chars} tool-argument characters."
+            ),
             data={
                 "type": event.type.value,
-                "text": event.text,
+                "text_chars": self._stream_text_chars,
+                "argument_chars": self._stream_argument_chars,
                 "tool_index": event.tool_index,
-                "tool_call_id": event.tool_call_id,
-                "tool_name": event.tool_name,
-                "arguments_delta": event.arguments_delta,
             },
+            visibility=Visibility.USER,
         )
 
     async def _execute_tool(
@@ -601,6 +621,16 @@ class AgentRuntime:
         data: dict[str, JsonValue] | None = None,
         visibility: Visibility = Visibility.DEBUG,
     ) -> None:
+        if self._event_sink is not None:
+            # Session events need lifecycle evidence, not duplicate task content.
+            self._event_sink(
+                kind,
+                {
+                    key: value
+                    for key, value in (data or {}).items()
+                    if key not in {"arguments", "final_text"}
+                },
+            )
         if self._tracer is not None:
             self._tracer.emit(
                 kind,

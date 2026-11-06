@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 from uuid import UUID
 
@@ -20,6 +21,7 @@ from forge_agent.engine import (
     AgentEngine,
     CancellationScope,
     ConversationContext,
+    EventSink,
     TurnResult,
     TurnStopReason,
 )
@@ -40,12 +42,14 @@ class SessionRuntime:
         tools: ToolRegistry,
         base_config: RunConfig,
         context_builder: ContextBuilder | None = None,
+        event_observer: EventSink | None = None,
     ) -> None:
         self.store = store
         self.engine = engine
         self.tools = tools
         self.base_config = base_config
         self.context_builder = context_builder
+        self._event_observer = event_observer
         self._queue: asyncio.PriorityQueue[tuple[int, InputEnvelope]] = asyncio.PriorityQueue()
         self._submit_lock = asyncio.Lock()
         self._next_sequence = 0
@@ -209,6 +213,10 @@ class SessionRuntime:
 
     def _event_sink(self, kind: EventKind, data: dict[str, object]) -> None:
         self.store.append("runtime_event", {"kind": kind.value, "data": data})
+        if self._event_observer is not None:
+            # A disconnected display must not discard durable session work.
+            with suppress(Exception):
+                self._event_observer(kind, data)
 
     def _recover(self) -> None:
         inputs: list[tuple[int, InputEnvelope]] = []

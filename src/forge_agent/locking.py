@@ -12,6 +12,7 @@ import importlib
 import math
 import os
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -19,10 +20,12 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
-if os.name == "nt":
+if sys.platform == "win32":
     import msvcrt
 else:
     _fcntl = importlib.import_module("fcntl")
+
+_WINDOWS = sys.platform == "win32"
 
 
 class LockUnavailable(TimeoutError):
@@ -57,8 +60,8 @@ def _thread_lock(key: str) -> threading.Lock:
 
 def _lock_directory() -> Path:
     directory_name = "forge-agent-locks"
-    if os.name != "nt":
-        directory_name = f"{directory_name}-{os.getuid()}"  # type: ignore[attr-defined]
+    if sys.platform != "win32":
+        directory_name = f"{directory_name}-{os.getuid()}"
     directory = Path(tempfile.gettempdir()) / directory_name
     try:
         directory.mkdir(mode=0o700, parents=False, exist_ok=True)
@@ -74,9 +77,8 @@ def _lock_directory() -> Path:
     if not stat.S_ISDIR(info.st_mode):
         raise LockUnavailable("the per-user lock path is not a directory")
 
-    if os.name != "nt" and (
-        info.st_uid != os.getuid()  # type: ignore[attr-defined]
-        or stat.S_IMODE(info.st_mode) & 0o077
+    if sys.platform != "win32" and (
+        info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
     ):
         raise LockUnavailable("the per-user lock directory has unsafe ownership or permissions")
     return directory
@@ -95,7 +97,7 @@ def _open_lock_file(directory: Path, key: str) -> int:
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    if os.name == "nt":
+    if sys.platform == "win32":
         flags |= os.O_APPEND
     try:
         descriptor = os.open(path, flags, 0o600)
@@ -111,15 +113,14 @@ def _open_lock_file(directory: Path, key: str) -> int:
             raise LockUnavailable("a lock file changed while it was being opened")
         if info.st_nlink != 1:
             raise LockUnavailable("a lock file must not have multiple hard links")
-        if os.name != "nt" and (
-            info.st_uid != os.getuid()  # type: ignore[attr-defined]
-            or stat.S_IMODE(info.st_mode) & 0o077
+        if sys.platform != "win32" and (
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077
         ):
             raise LockUnavailable("a lock file has unsafe ownership or permissions")
         else:
             os.chmod(path, 0o600)
 
-        if os.name == "nt" and info.st_size == 0:
+        if _WINDOWS and info.st_size == 0:
             # msvcrt.locking requires a byte range that exists. O_APPEND makes
             # simultaneous first-time initialization harmless.
             os.lseek(descriptor, 0, os.SEEK_END)
@@ -132,7 +133,7 @@ def _open_lock_file(directory: Path, key: str) -> int:
 
 
 def _try_os_lock(descriptor: int) -> bool:
-    if os.name == "nt":
+    if sys.platform == "win32":
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
@@ -146,17 +147,19 @@ def _try_os_lock(descriptor: int) -> bool:
             raise
         return True
 
-    try:
-        _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-    except OSError as error:
-        if error.errno in {errno.EACCES, errno.EAGAIN, errno.EINTR}:
-            return False
-        raise
-    return True
+    if sys.platform != "win32":
+        try:
+            _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EINTR}:
+                return False
+            raise
+        return True
+    return False
 
 
 def _unlock(descriptor: int) -> None:
-    if os.name == "nt":
+    if sys.platform == "win32":
         os.lseek(descriptor, 0, os.SEEK_SET)
         msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
     else:

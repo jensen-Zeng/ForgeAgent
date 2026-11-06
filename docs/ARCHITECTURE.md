@@ -32,6 +32,12 @@ flowchart LR
 
 The runtime never accepts a model-provided risk class, approval result, or backend. Those are calculated by local policy after tool arguments are parsed.
 
+### Read-only planning mode
+
+`forge plan TASK --workspace PATH [--config FILE] [--trace PATH] [--stream]` runs the regular model/tool loop with a planning prompt and a host-created registry containing only `list_files`, `read_file`, `search_code`, `git_diff`, and `git_status`. Patch, command, and Kernel tools are absent, so a model response cannot apply its own plan. It does not select a worktree and accepts dirty or non-Git workspaces. The command still calls the configured Provider and writes a JSONL trace (by default under the selected workspace's `.forge/traces/`). Its run-lock resource is keyed to the workspace or discovered Git root, but the lock file itself is stored in the user's system temporary `forge-agent-locks` directory, not under `.forge/`. “Read-only” means no repository edits or command execution through ForgeAgent, not zero filesystem or network effects.
+
+Repository instructions are loaded from the workspace root to the target file's parent directory, without reading home-directory or other ancestor rules outside the workspace. At each level only the first present file in this order is used: `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`. The root `.github/copilot-instructions.md` remains an additional compatibility input. Explicitly named rule files are considered even when `.gitignore` excludes them. Reads are capped at 8,000 characters per file and 24,000 characters across the hierarchy (with a 32 KiB byte-read cap per file); UTF-8 BOM is accepted and truncation is surfaced. `read_file` and `list_files` include applicable scoped instructions in their results so nested policy is visible before editing or planning new files. Instruction reads do not count as host-observed reads of the target file. All repository content, including instruction files, is untrusted context and cannot grant capabilities or override host policy.
+
 ### Concurrent repository editing
 
 Safe and trusted `run` entry points select a managed Git worktree by default. The source must be the Git top-level directory, have a commit, have no tracked or staged changes (including under `.forge/`), and have no untracked files outside `.forge/`; only untracked `.forge/` metadata is exempt. ForgeAgent does not stash or discard source edits. Each run uses a retained branch `forge/<uuid>` and checkout under `.forge/worktrees/<uuid>/checkout`; session data is rooted in that checkout. Workspace inspection exposes a bounded diff against the recorded base commit, including safe, bounded untracked text files. Secrets, symlinks, binary/oversized files, and excessive output are excluded.
@@ -39,6 +45,8 @@ Safe and trusted `run` entry points select a managed Git worktree by default. Th
 This separates working copies, not processes or permissions. Changes saved in the source checkout while a run is active do not enter the Agent checkout. The Agent does not commit, merge, delete, or push automatically. Users review the diff and merge the branch themselves. The worktree is not a sandbox, especially in RLM mode.
 
 `--in-place` opts into a shared checkout. CLI `run`/`resume` operations acquire an exclusive workspace lock, and an active RLM session additionally owns its session lock. A second CLI operation fails with `workspace_busy`. The production patch registry requires a host-recorded read before modifying a file. After approval, patch application obtains canonical per-file advisory locks in sorted order and verifies the observed digest and exact old text before replacing. Optional `base_sha256` pins the caller's expected version. A changed version fails with `stale_read` or `concurrent_modification`; missing a required read fails with `read_required`; lock contention can fail with `write_lock_timeout`. Recovery requires another read and a new approved patch, never an automatic merge.
+
+Read-only Git status/diff disables optional index writes, fsmonitor, and external diff/textconv helpers. It skips recursive submodule inspection. Active clean/smudge/process filters anywhere in the containing repository cause this inspection path to fail with `git_filter_unsupported`; unused global filter configuration is allowed.
 
 New files use atomic create-if-absent. Individual replacements are atomic, but a multi-file patch is not transactional; rollback is best-effort and checks for external modifications before restoring. Advisory locks do not bind editors or unrelated processes, and unsaved buffers are invisible. A narrow time-of-check/time-of-use race remains with applications that ignore the lock.
 
@@ -72,7 +80,9 @@ Messages, content blocks, tool calls, usage, results, budgets, and stop reasons 
 
 ### Provider stream
 
-Providers emit a common stream of text deltas, tool-call deltas, usage, completion, and error events. The compatible `generate()` API collects these events into a complete response.
+The common stream yields text deltas, tool-argument deltas, and one completed response containing Usage; protocol and transport failures raise structured Provider errors. OpenAI-compatible and Ollama adapters consume SSE; Anthropic consumes the native Messages SSE protocol. Stream cancellation closes the active request. The compatible `generate()` API returns the same normalized complete-response model through non-streaming HTTP and retains configured retries. Safe `run` and `plan` default to `generate()`; explicit `--stream` selects the stream interface. Trusted RLM always uses streaming. Streaming requests are not automatically retried, because a retry could duplicate provider work or charges.
+
+The CLI reports rate-limited character counts and lifecycle events while a response is arriving; it does not print raw text or partial tool arguments. A secret can cross SSE chunk boundaries, so redacting individual fragments would not reliably protect it. JSONL traces retain structured events but not raw token/text fragments. Final answers retain the normal complete-response rendering.
 
 ### Tools
 

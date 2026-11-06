@@ -32,6 +32,7 @@ from forge_agent.session import InputEnvelope, SessionRuntime, SessionStore
 from forge_agent.tools import ExecutePythonTool, ToolRegistry, Workspace
 
 RegistryFactory = Callable[[], ToolRegistry]
+ProgressObserver = Callable[[UUID, str, dict[str, object]], None]
 _SECRET_MARKERS = ("API_KEY", "AUTH", "CREDENTIAL", "PASSWORD", "SECRET", "TOKEN")
 _SHELL_ENV_ALLOWLIST = frozenset(
     {
@@ -90,11 +91,13 @@ class RLMApplication:
         provider: ModelProvider,
         store: SessionStore,
         registry_factory: RegistryFactory,
+        progress_observer: ProgressObserver | None = None,
     ) -> None:
         self.settings = settings
         self.provider = provider
         self.store = store
         self.registry_factory = registry_factory
+        self._progress_observer = progress_observer
         self._ownership_context = acquire_locks([store.directory / "runtime-owner"], timeout=0)
         self._ownership_held = False
         self._shutdown_lock = asyncio.Lock()
@@ -184,6 +187,7 @@ class RLMApplication:
     def _make_runtime(self, store: SessionStore) -> SessionRuntime:
         def persist_kernel_event(kind: str, data: dict[str, object]) -> None:
             store.append("runtime_event", {"kind": kind, "data": data})
+            self._notify_progress(store.header.session_id, kind, data)
 
         bridge = HostBridge(
             store.directory / ".bridge",
@@ -226,6 +230,9 @@ class RLMApplication:
             tools=registry,
             base_config=config,
             context_builder=builder,
+            event_observer=lambda kind, data: self._notify_progress(
+                store.header.session_id, kind.value, data
+            ),
         )
         self.stores[store.header.session_id] = store
         self.runtimes[store.header.session_id] = runtime
@@ -234,6 +241,17 @@ class RLMApplication:
         if hasattr(self, "child_manager"):
             self._register_bridge_handlers(store)
         return runtime
+
+    def _notify_progress(self, session_id: UUID, kind: str, data: dict[str, object]) -> None:
+        if self._progress_observer is not None:
+            try:
+                # Displays receive identifiers/counters only, never raw kernel output.
+                progress = {
+                    key: data[key] for key in ("text_chars", "argument_chars") if key in data
+                }
+                self._progress_observer(session_id, kind, progress)
+            except Exception:
+                pass
 
     def _register_bridge_handlers(self, sender: SessionStore) -> None:
         bridge = self.bridges[sender.header.session_id]

@@ -8,13 +8,13 @@ from enum import StrEnum
 from typing import Protocol, TypeVar
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from forge_agent.domain import Message, RunConfig, RunMetrics, RunStatus, StopReason
 from forge_agent.models import ModelProvider
 from forge_agent.runtime import AgentRuntime, build_initial_messages
 from forge_agent.tools import ToolRegistry
-from forge_agent.tracing import EventKind, RunTracer, Visibility
+from forge_agent.tracing import EventKind, Redactor, RunTracer, Visibility
 
 T = TypeVar("T")
 
@@ -147,12 +147,23 @@ class LoopAgentEngine:
             {"turn_id": str(turn_id), "session_id": str(context.session_id)},
             event_sink,
         )
+
+        def forward_event(kind: EventKind, data: dict[str, JsonValue]) -> None:
+            sanitized, _ = Redactor().sanitize_mapping(data)
+            self._emit(
+                kind,
+                {**sanitized, "turn_id": str(turn_id), "session_id": str(context.session_id)},
+                event_sink,
+                trace=False,
+            )
+
         runtime = AgentRuntime(
             provider=self._provider,
             tools=tools,
             tracer=self._tracer,
             streaming=True,
             boundary_cancelled=lambda: scope.boundary_requested,
+            event_sink=forward_event,
         )
         result = await scope.run(runtime.run(context.run_config, initial_messages=context.messages))
         stop_reason = _turn_reason(result.status, result.stop_reason)

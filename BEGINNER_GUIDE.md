@@ -113,6 +113,24 @@ Command policy has three outcomes:
 
 The model cannot set its own risk class, approval, or execution backend.
 
+### 只读规划：先审阅，再决定是否实施
+
+如果只想让模型先读代码并给出方案，运行：
+
+```powershell
+.\.venv\Scripts\forge.exe plan `
+  "分析登录模块并提出增加限流的实现步骤" `
+  --workspace . `
+  --config .\forge.toml `
+  --stream
+```
+
+它不创建 Git worktree，因此 Git 仓库可以有未提交改动，也可以不是 Git 仓库。Agent 只拿到列目录、读文件、搜索、查看 Git Diff/Status 这五种工具；没有修改补丁、运行命令或 IPython Kernel 工具，不会自动实施计划。它仍会向所配置的模型服务发送请求，并使用 workspace（或找到的 Git 根目录）作为运行锁的逻辑资源；实际锁文件在用户系统临时目录的 `forge-agent-locks`，不会写在 `.forge/`。默认 JSONL 轨迹写在选定 workspace 的 `.forge/traces/`（可用 `--trace PATH` 改位置）。所以这里的“只读”指 ForgeAgent 不修改项目源码、不执行项目命令，而不是完全没有网络或磁盘操作。
+
+普通 `forge run` 和 `forge plan` 默认走完整响应接口，保留 Provider 重试；添加 `--stream` 才启用流式请求并查看节流后的进度计数。进度只显示字符数量和操作生命周期，不会显示原始文本或工具参数碎片。流式请求不自动重试；中断后是否重发由你决定，因为服务端可能已经处理并计费。可信 RLM 总是使用流式接口。
+
+仓库规则也会进入模型上下文：从 workspace 根目录沿目录路径到目标文件所在目录（不读取 workspace 外的父目录或用户主目录），每层优先级为 `AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md`，每个目录只加载一份；根目录 `.github/copilot-instructions.md` 仍作为兼容的额外提示。显式规则文件即使被 `.gitignore` 忽略仍会加载。每份上限 8,000 个字符，整条路径合计上限 24,000 个字符（单文件最多读取 32 KiB），UTF-8 BOM 可识别，截断会标注。读文件和列目录时会附上相关的局部规则，方便模型在写新文件前看到约束。它们和 README 一样都是仓库内容，是不可信的数据；可以描述代码约定，但不会授予工具或文件权限，也不能覆盖宿主安全策略。
+
 ## 7. Understand trusted RLM mode
 
 ```powershell
@@ -193,6 +211,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries and i
 | `src/forge_agent/runtime.py` | compatible agent runtime entry |
 | `src/forge_agent/engine.py` | single-turn model/tool loop |
 | `src/forge_agent/context.py` | context construction and bounds |
+| `src/forge_agent/instructions.py` | bounded hierarchical repository instruction loading |
 | `src/forge_agent/tools/` | repository, patch, Git, and command tools |
 | `src/forge_agent/policy.py` | deterministic command risk classification |
 | `src/forge_agent/sandbox.py` | Docker command specification and cleanup |
@@ -213,6 +232,8 @@ The provider adapter converts every service response into ForgeAgent's own messa
 ### Events
 
 Events contain stable IDs, session/run IDs, correlation IDs, a generation, a kind, and structured data. Start/end or start/failure pairs make concurrent operations reconstructable from the event stream.
+
+OpenAI-compatible and Ollama adapters use SSE; Anthropic uses its native Messages SSE stream, including text and partial structured tool arguments. Trusted RLM always consumes the provider-neutral stream contract. Safe run/plan use it only when `--stream` is selected; otherwise they use complete responses and preserve Provider retries. While streaming, the CLI shows rate-limited character counts and operation lifecycle events instead of raw partial text or arguments. This avoids displaying secret fragments that may only become recognizable after adjacent stream chunks arrive. Streaming requests are not automatically retried, and JSONL traces record events without storing raw text fragments. The final full answer is shown normally.
 
 ### Usage and cost
 

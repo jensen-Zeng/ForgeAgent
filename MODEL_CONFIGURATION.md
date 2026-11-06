@@ -184,6 +184,21 @@ Runtime 会累计 `Usage.cost` 中已知的美元费用，并在达到上限时�
 
 这会产生真实 API 请求和费用。建议先把 Token、费用及服务商控制台硬限额设置得较低。
 
+普通 `forge run` 和只读 `forge plan` 默认使用完整响应的 `generate()` 路径，保留 Provider 已配置的重试行为。可显式添加 `--stream` 开启流式请求并显示节流后的进度计数；Anthropic 使用 Messages API 原生 SSE，包括文本分片、结构化工具参数分片和 Usage，OpenAI-compatible/Ollama 也使用 SSE。CLI 不显示原始文本或参数片段，以免跨 chunk 的敏感内容在尚未完整时绕过脱敏。流式请求不会自动重试；连接中断后应由用户决定是否重发，因为部分请求可能已被服务端处理并计费。可信 RLM 始终使用流式接口。当前自动化覆盖由假 HTTP/SSE 响应驱动的离线协议行为，不会连接真实服务，也不能证明某个服务商兼容性或模型质量。费用上限语义仍取决于服务端最终返回的 Usage，不能把收到部分流数据当成已确认费用。
+
+若只需要检查方案，可在同一模型配置下运行：
+
+```powershell
+.\.venv\Scripts\forge.exe plan `
+  "阅读仓库并提出实现步骤和测试命令" `
+  --workspace . `
+  --config .\forge.toml `
+  --trace .\.forge\traces\planning.jsonl `
+  --stream
+```
+
+`plan` 不创建隔离 worktree，不要求 Git 仓库或干净状态；只注册目录列表、文件读取、文本搜索、Git Diff 和 Git Status。它不会提供补丁、命令或 Kernel 能力，因此不自动修改源码或执行验证命令。它仍会发起真实模型请求，并按默认或显式流式选择执行；运行锁的逻辑资源归属于 workspace（或发现的 Git 根目录），但实际锁文件位于用户系统临时目录的 `forge-agent-locks`，不会写入 `.forge/`。默认轨迹位于选定 workspace 的 `.forge/traces/`。检查规划内容不会替代后续实施和测试。
+
 ## 8. 可信 RLM 使用同一套模型配置
 
 RLM 使用与普通 `forge run` 完全相同的 Provider、Base URL、模型名、API Key、Token 与费用配置。先在 Provider 控制台设置独立项目的费用硬限额，再执行：

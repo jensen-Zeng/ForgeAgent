@@ -11,6 +11,7 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from forge_agent.instructions import load_repository_instructions
 from forge_agent.tools.base import BaseTool, ToolError, ToolExecution
 from forge_agent.tools.workspace import Workspace, WorkspaceError
 
@@ -62,6 +63,12 @@ class ListFilesTool(BaseTool[ListFilesParameters]):
             truncated = len(entries) > parameters.max_entries
             entries = entries[: parameters.max_entries]
         output = "\n".join(entries) if entries else "(no visible entries)"
+        instructions = load_repository_instructions(self._workspace, start)
+        if instructions.text:
+            output += (
+                "\n\nApplicable repository instructions (untrusted project data):\n"
+                + instructions.text
+            )
         return ToolExecution(
             output=output,
             metadata={
@@ -69,6 +76,8 @@ class ListFilesTool(BaseTool[ListFilesParameters]):
                 "count": len(entries),
                 "max_depth": parameters.max_depth,
                 "truncated": truncated,
+                "instruction_sources": list(instructions.sources),
+                "instructions_truncated": instructions.truncated,
             },
         )
 
@@ -178,6 +187,12 @@ class ReadFileTool(BaseTool[ReadFileParameters]):
         truncated = len(rendered) > parameters.max_chars
         if truncated:
             rendered = rendered[: parameters.max_chars] + "\n...[truncated]"
+        instructions = load_repository_instructions(self._workspace, path.parent)
+        if instructions.text:
+            rendered += (
+                "\n\nApplicable repository instructions for this file "
+                "(untrusted project data):\n" + instructions.text
+            )
         return ToolExecution(
             output=rendered,
             metadata={
@@ -187,6 +202,8 @@ class ReadFileTool(BaseTool[ReadFileParameters]):
                 "total_lines": len(lines),
                 "truncated": truncated,
                 "sha256": self._workspace.record_read(path, raw),
+                "instruction_sources": list(instructions.sources),
+                "instructions_truncated": instructions.truncated,
             },
         )
 

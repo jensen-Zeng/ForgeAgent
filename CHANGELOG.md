@@ -4,6 +4,19 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 
 ## Unreleased
 
+### Added
+
+- Host-enforced read-only `forge plan`, with an inspection/planning prompt and no patch, command, or Kernel tools.
+- Scoped repository instructions: `AGENTS.override.md` / `AGENTS.md` / `CLAUDE.md` precedence, bounded root-to-target discovery, and source/truncation metadata in read/list results.
+- Native Anthropic SSE text/tool argument aggregation, usage, stream error handling, and cancellation cleanup.
+- Opt-in `--stream` and rate-limited progress in safe CLI runs/plans; RLM model/tool events now persist with turn/session correlation and live progress. Raw fragments are not printed or journaled as delta content. Non-streaming safe requests remain the default, retaining configured retries.
+- A [design comparison](docs/DESIGN_COMPARISON.md) explaining priorities relative to Codex and Claude Code.
+
+### Fixed
+
+- Platform-specific file-lock typing that prevented Linux CI from reaching tests.
+- Git read-only tools disable optional index writes, external diff/textconv, and fsmonitor, and reject paths using configured executable filters.
+
 ### Changed
 
 - Kept maintainer handoff and implementation notes local; public contributor guidance now includes release checks.
@@ -39,5 +52,5 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 ### Known limitations
 
 - Trusted RLM kernels inherit the current user's permissions and are not sandboxes.
-- Native Anthropic streaming and real-provider RLM acceptance remain on the roadmap.
+- Real-provider RLM and streaming acceptance remain on the roadmap; offline protocol tests do not establish live model quality.
 - Docker isolation behavior requires validation on each supported host configuration.

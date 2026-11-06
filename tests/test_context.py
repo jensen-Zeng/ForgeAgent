@@ -50,11 +50,11 @@ def result(
     )
 
 
-def test_initial_context_loads_rules_by_priority_and_safe_directory(
+def test_initial_context_loads_preferred_root_rule_and_safe_directory(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "AGENTS.md").write_text("Highest project rule", encoding="utf-8")
-    (tmp_path / "CLAUDE.md").write_text("Secondary rule", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("Lower priority rule", encoding="utf-8")
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / ".env").write_text("SECRET=hidden\n", encoding="utf-8")
     manager = ContextManager(Workspace(tmp_path))
@@ -62,7 +62,8 @@ def test_initial_context_loads_rules_by_priority_and_safe_directory(
     messages = manager.start(RunConfig(task="Inspect", workspace=tmp_path))
 
     system_text = messages[0].content[0].text  # type: ignore[union-attr]
-    assert system_text.index("Highest project rule") < system_text.index("Secondary rule")
+    assert "Highest project rule" in system_text
+    assert "Lower priority rule" not in system_text
     assert "app.py" in system_text
     assert ".env" not in system_text
     assert "untrusted project data" in system_text

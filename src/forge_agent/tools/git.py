@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 import subprocess
 from pathlib import Path
 from typing import ClassVar, cast
@@ -33,12 +34,30 @@ class _GitTool:
     def __init__(self, workspace: Workspace) -> None:
         self._workspace = workspace
 
-    def _run_git(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(
+        self,
+        arguments: list[str],
+        *,
+        expected_returncodes: tuple[int, ...] = (0,),
+        input_text: str | None = None,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         try:
             completed = subprocess.run(
-                ["git", "-C", str(self._workspace.root), *arguments],
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "diff.external=",
+                    "-C",
+                    str(cwd or self._workspace.root),
+                    *arguments,
+                ],
                 check=False,
                 capture_output=True,
+                input=input_text,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -49,7 +68,7 @@ class _GitTool:
             raise ToolError("Git executable is unavailable", code="git_unavailable") from error
         except subprocess.TimeoutExpired as error:
             raise ToolError("Git command timed out", code="git_timeout") from error
-        if completed.returncode != 0:
+        if completed.returncode not in expected_returncodes:
             error_text = completed.stderr.strip()
             if "not a git repository" in error_text.casefold():
                 raise ToolError(
@@ -61,6 +80,64 @@ class _GitTool:
                 code="git_error",
             )
         return completed
+
+    def _ensure_no_applied_filters(self) -> None:
+        root_result = self._run_git(["rev-parse", "--show-toplevel"])
+        try:
+            git_root = Path(root_result.stdout.strip()).resolve(strict=True)
+            self._workspace.root.relative_to(git_root)
+        except (OSError, ValueError) as error:
+            raise ToolError(
+                "Unable to resolve the Git root for safe filter inspection",
+                code="git_error",
+            ) from error
+        tracked = tuple(
+            path
+            for path in self._run_git(["ls-files", "-z"], cwd=git_root).stdout.split("\0")
+            if path
+        )
+        if not tracked:
+            return
+        attributes = self._run_git(
+            ["check-attr", "-z", "filter", "--stdin"],
+            input_text="".join(f"{path}\0" for path in tracked),
+            cwd=git_root,
+        ).stdout.split("\0")
+        active_drivers = {
+            attributes[index + 2].casefold()
+            for index in range(0, len(attributes) - 2, 3)
+            if attributes[index + 1] == "filter"
+            and attributes[index + 2] not in {"", "unspecified", "unset", "set"}
+        }
+        if not active_drivers:
+            return
+        completed = self._run_git(
+            [
+                "config",
+                "--null",
+                "--get-regexp",
+                r"^filter\..*\.(clean|smudge|process)$",
+            ],
+            expected_returncodes=(0, 1),
+            cwd=git_root,
+        )
+        if completed.returncode == 1:
+            return
+        configured_drivers: set[str] = set()
+        for entry in completed.stdout.split("\0"):
+            if "\n" not in entry:
+                continue
+            key, value = entry.split("\n", 1)
+            match = re.fullmatch(r"filter\.(.+)\.(?:clean|smudge|process)", key)
+            if match and value.strip():
+                configured_drivers.add(match.group(1).casefold())
+        unsupported = sorted(active_drivers & configured_drivers)
+        if unsupported:
+            raise ToolError(
+                "Git filter(s) are configured for tracked files; read-only Git inspection "
+                "is disabled for this repository",
+                code="git_filter_unsupported",
+            )
 
     def _validate_paths(self, paths: tuple[str, ...]) -> tuple[str, ...]:
         validated: list[str] = []
@@ -84,7 +161,17 @@ class GitStatusTool(_GitTool, BaseTool[GitStatusParameters]):
 
     def run(self, parameters: GitStatusParameters) -> ToolExecution:
         del parameters
-        completed = self._run_git(["status", "--short", "--untracked-files=all", "--", "."])
+        self._ensure_no_applied_filters()
+        completed = self._run_git(
+            [
+                "status",
+                "--ignore-submodules=all",
+                "--short",
+                "--untracked-files=all",
+                "--",
+                ".",
+            ]
+        )
         output = completed.stdout.rstrip() or "(working tree clean)"
         count = len(completed.stdout.splitlines())
         return ToolExecution(output=output, metadata={"entry_count": count})
@@ -98,12 +185,15 @@ class GitDiffTool(_GitTool, BaseTool[GitDiffParameters]):
     parameters_type: ClassVar[type[BaseModel]] = GitDiffParameters
 
     def run(self, parameters: GitDiffParameters) -> ToolExecution:
+        self._ensure_no_applied_filters()
         paths = self._validate_paths(parameters.paths)
         arguments = [
             "-c",
             "core.quotepath=false",
             "diff",
             "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=all",
             "--no-color",
         ]
         if parameters.staged:

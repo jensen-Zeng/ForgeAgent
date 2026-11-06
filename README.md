@@ -18,6 +18,8 @@ ForgeAgent 是一个运行在终端中的本地代码仓库 Agent。它把模型
 
 - OpenAI-compatible、Anthropic、Ollama 和可脚本化 Fake Provider。
 - 模型—工具闭环、流式事件、明确停止原因以及 Token、费用、时间和工具调用预算。
+- `forge run` / `forge plan` 默认保留完整响应模式与 Provider 重试；可显式加 `--stream` 查看节流后的进度计数。可信 RLM 始终使用流式接口。
+- `forge plan` 只读规划入口：可检查 Git 或非 Git、干净或有未提交更改的目录，不创建 worktree、不提供补丁或命令工具。
 - 工作区边界、敏感路径拒绝、精确上下文补丁、原子写入和 Git Diff。
 - 默认 Git worktree 隔离、多 Agent checkout 管理，以及显式 `--in-place` 文件锁与陈旧读取检测。
 - `SAFE / REVIEW / DENY` 命令策略，以及本地执行和 Docker 沙箱的自动路由。
@@ -31,8 +33,8 @@ ForgeAgent 是一个运行在终端中的本地代码仓库 Agent。它把模型
 当前版本为 `0.3.0.dev0`，属于 Alpha 阶段。
 
 - 默认安全模式和可信 RLM 第一阶段已经完成离线实现。
-- 本地完整回归为 `264 passed`，覆盖率 `87.02%`，门禁为 80%（Windows / Python 3.12.9；2026-10-15）。
-- GitHub Actions 配置了 Windows/Linux 与 Python 3.12/3.13 四个组合。代码提交 `391b28f` 的 [CI 结果](https://github.com/jensen-Zeng/ForgeAgent/actions/runs/38357430262)中，两个 Windows 任务通过，两个 Linux 任务在 `locking.py` 的类型检查阶段失败，尚未运行后续测试；修复列入路线图。
+- 本地完整回归为 `299 passed`，覆盖率 `86.91%`，门禁为 80%（Windows / Python 3.12.9；2026-11-07）。
+- GitHub Actions 配置了 Windows/Linux 与 Python 3.12/3.13 四个组合。本轮修复了此前阻断 Linux CI 的文件锁类型检查，Windows/Linux mypy 已在本地通过；四组合运行结果以 [CI](https://github.com/jensen-Zeng/ForgeAgent/actions/workflows/ci.yml) 为准。
 - RLM 测试使用真实本地 IPython Kernel，但模型为 Faux/Mock；这证明会话和桥接行为，不代表在线模型效果。
 - Docker 规格和自动路由已有测试，但真实隔离能力仍需在实际 Docker 宿主上验收。
 - 真实 Provider 的质量、兼容性和费用结论必须通过用户自己的服务配置和预算验证。
@@ -96,7 +98,25 @@ Ollama 不要求 API Key。完整参数、价格快照和费用边界见 [模型
 
 托管 worktree 会拒绝对使用 Git LFS 等外部 clean/smudge/process filter 的文件执行 checkout 或 diff，以避免运行本机配置的 filter 程序。此类仓库可显式选择 `--in-place`，但它只是共享工作区模式，不会把 Git filter 或其他代码限制在沙箱中。
 
+安全模式的 `run` 和 `plan` 默认使用非流式 `generate()`，保留既有 Provider 重试行为。需要进度提示时可追加 `--stream`；CLI 只显示节流后的字符计数和生命周期信息，不显示原始文本或工具参数分片。流式请求不会自动重试；取消或中断后如需继续，请重新发起任务并留意可能产生的重复请求/费用。RLM 始终使用流式 Provider 接口。
+
 开始前请提交或备份目标仓库，并审查 Agent 最终给出的 Diff。隔离 checkout 中的有界仓库工具修改与源 checkout 分开；可信 RLM 的任意 Python 仍可访问当前用户有权限访问的绝对路径。模型无法绕过本地工具的路径、审批和命令策略。
+
+### 只生成实施计划
+
+如果现在只想让 Agent 阅读仓库并提出方案，可用 `forge plan`：
+
+```powershell
+.\.venv\Scripts\forge.exe plan `
+  "评估如何为这个模块增加缓存，并列出验证步骤" `
+  --workspace . `
+  --config .\forge.toml `
+  --stream
+```
+
+该模式不创建 worktree，对 Git/工作区脏状态没有要求；工具注册表仅包含 `list_files`、`read_file`、`search_code`、`git_diff` 和 `git_status`，没有补丁、命令或 Kernel 工具，不会自动应用计划。它仍会连接已配置的模型服务，并使用 workspace 或其 Git 根目录对应的逻辑资源名协调运行锁；实际锁文件位于当前用户系统临时目录的 `forge-agent-locks`，不会在 `.forge/` 中创建锁文件。默认 JSONL 轨迹位于选定 workspace 的 `.forge/traces/`，可用 `--trace PATH` 指定轨迹位置。它保护仓库源码不被 ForgeAgent 的工具修改，不代表完全无磁盘写入或无网络访问。
+
+仓库指令按根目录到目标文件目录逐层加载：每层优先选择 `AGENTS.override.md`，其次 `AGENTS.md`，再其次 `CLAUDE.md`；根目录的 `.github/copilot-instructions.md` 作为兼容的额外提示。读取有大小上限。规则文件、README 和其他仓库内容都是不可信项目数据，可提供任务上下文，但不能授予权限、覆盖本地安全策略或让 `plan` 使用未注册的工具。
 
 如需显式在当前 checkout 中操作，可使用 `--in-place`。该模式会拒绝同一工作区内并发的 ForgeAgent run/resume，并对文件补丁实施跨进程锁和读取版本校验；每个 RLM 会话另有生命周期所有权锁，防止重复 resume/repair。关闭时会先取消活动 turn 并等其退出，再释放所有权；尚未开始的排队输入仍保存在会话中，可在之后恢复。外部编辑器不遵守这些锁，无法消除所有竞态。并发工作方式和合并步骤见[并发编辑指南](./docs/CONCURRENT_EDITING.md)。
 
@@ -183,11 +203,13 @@ Provider 层把不同服务规范化为统一的消息、工具调用、Usage �
 | Provider | 入口 | 说明 |
 | --- | --- | --- |
 | OpenAI-compatible | `FORGE_MODEL_PROVIDER=openai` | Chat Completions 兼容接口，支持 SSE 文本与工具参数聚合 |
-| Anthropic | `FORGE_MODEL_PROVIDER=anthropic` | Messages API；当前以完整响应适配统一事件 |
+| Anthropic | `FORGE_MODEL_PROVIDER=anthropic` | Messages API 原生 SSE；支持文本、结构化工具参数增量、Usage 与取消 |
 | Ollama | `FORGE_MODEL_PROVIDER=ollama` | 本地兼容服务，不要求 API Key |
 | Fake | 测试注入 | 可脚本化文本、工具分片、延迟、错误和 Usage |
 
 配置优先级为：内置默认值 < `forge.toml` < 环境变量 < CLI 覆盖。ForgeAgent 不自动读取目标仓库中的 `.env`。
+
+使用 `--stream` 或可信 RLM 时，CLI 显示限频的字符计数和生命周期事件；最终答案仍按完整响应展示。原始文本或工具参数分片不会作为增量内容写入轨迹，以免跨分片的凭据绕过脱敏。
 
 ## 评测与质量门禁
 
@@ -231,6 +253,7 @@ ForgeAgent/
 ## 文档
 
 - [架构说明](./docs/ARCHITECTURE.md)
+- [Codex / Claude Code 设计对照与改进依据](./docs/DESIGN_COMPARISON.md)
 - [新手指南](./BEGINNER_GUIDE.md)
 - [模型配置](./MODEL_CONFIGURATION.md)
 - [安全策略](./SECURITY.md)

@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
+from uuid import UUID
 
 import typer
 from pydantic import JsonValue
@@ -128,6 +129,13 @@ def run_command(
     isolate: Annotated[
         bool, typer.Option("--isolate/--in-place", help="Use a separate Git worktree (default).")
     ] = True,
+    streaming: Annotated[
+        bool,
+        typer.Option(
+            "--stream/--no-stream",
+            help="Show throttled model progress (default keeps provider retry behavior).",
+        ),
+    ] = False,
 ) -> None:
     """Run the coding agent against one bounded workspace."""
     settings = _load_cli_settings(workspace=workspace, config_path=config_path)
@@ -140,8 +148,53 @@ def run_command(
         settings = _select_run_workspace(settings, isolate=isolate)
         with acquire_locks((_run_lock_path(settings),), timeout=0):
             handed_off = True
-            _run_safe_workspace(settings, task, trace_path, provider)
+            _run_safe_workspace(settings, task, trace_path, provider, streaming=streaming)
     except (WorktreeError, LockUnavailable) as error:
+        _workspace_failure(error)
+    finally:
+        if not handed_off:
+            asyncio.run(provider.aclose())
+
+
+@app.command("plan")
+def plan_command(
+    task: Annotated[str, typer.Argument(help="Natural-language repository planning task.")],
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Repository directory to inspect read-only."),
+    ] = Path("."),
+    config_path: Annotated[
+        Path | None,
+        typer.Option("--config", help="Optional forge.toml path."),
+    ] = None,
+    trace_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--trace", help="JSONL trace path; defaults to WORKSPACE/.forge/traces/RUN_ID.jsonl."
+        ),
+    ] = None,
+    streaming: Annotated[
+        bool,
+        typer.Option(
+            "--stream/--no-stream",
+            help="Show throttled model progress (default keeps provider retry behavior).",
+        ),
+    ] = False,
+) -> None:
+    """Create a plan using read-only repository tools; never edit or execute code."""
+    settings = _load_cli_settings(workspace=workspace, config_path=config_path)
+    try:
+        provider = _create_live_provider(settings.model)
+    except ConfigurationError as error:
+        _configuration_failure(error)
+    handed_off = False
+    try:
+        with acquire_locks((_run_lock_path(settings),), timeout=0):
+            handed_off = True
+            _run_safe_workspace(
+                settings, task, trace_path, provider, read_only=True, streaming=streaming
+            )
+    except LockUnavailable as error:
         _workspace_failure(error)
     finally:
         if not handed_off:
@@ -153,10 +206,20 @@ def _run_safe_workspace(
     task: str,
     trace_path: Path | None,
     provider: ModelProvider,
+    *,
+    read_only: bool = False,
+    streaming: bool = False,
 ) -> None:
     try:
         result, resolved_trace, tracer = asyncio.run(
-            _prepare_and_run_safe_workspace(settings, task, trace_path, provider)
+            _prepare_and_run_safe_workspace(
+                settings,
+                task,
+                trace_path,
+                provider,
+                read_only=read_only,
+                streaming=streaming,
+            )
         )
     except KeyboardInterrupt:
         console.print("[yellow]Run cancelled by user.[/yellow]")
@@ -177,10 +240,18 @@ async def _prepare_and_run_safe_workspace(
     task: str,
     trace_path: Path | None,
     provider: ModelProvider,
+    *,
+    read_only: bool = False,
+    streaming: bool = False,
 ) -> tuple[RunResult, Path, RunTracer]:
     try:
         config, resolved_trace, tracer, runtime = _prepare_safe_workspace(
-            settings, task, trace_path, provider
+            settings,
+            task,
+            trace_path,
+            provider,
+            read_only=read_only,
+            streaming=streaming,
         )
         return await runtime.run(config), resolved_trace, tracer
     finally:
@@ -193,9 +264,14 @@ def _prepare_safe_workspace(
     task: str,
     trace_path: Path | None,
     provider: ModelProvider,
+    *,
+    read_only: bool = False,
+    streaming: bool = False,
 ) -> tuple[RunConfig, Path, RunTracer, AgentRuntime]:
     config = settings.to_run_config(task)
     resolved_trace = _resolve_trace_path(trace_path, config)
+    if read_only:
+        console.print("[bold cyan]ForgeAgent read-only planning mode[/bold cyan]")
     _show_run_configuration(settings, config, resolved_trace)
 
     tracer = RunTracer(
@@ -214,7 +290,7 @@ def _prepare_safe_workspace(
             )
         ),
     )
-    registry = _build_registry(settings, tracer=tracer)
+    registry = _build_registry(settings, tracer=tracer, read_only=read_only)
     context_workspace = Workspace(
         settings.workspace.allowed_root,
         respect_gitignore=settings.workspace.respect_gitignore,
@@ -229,7 +305,9 @@ def _prepare_safe_workspace(
             compression_ratio=float(settings.context.compression_ratio),
             repeated_call_limit=settings.context.repeated_call_limit,
             preserve_recent_messages=settings.context.preserve_recent_messages,
+            read_only=read_only,
         ),
+        streaming=streaming,
     )
     return config, resolved_trace, tracer, runtime
 
@@ -278,6 +356,7 @@ def _start_rlm_workspace(settings: ForgeSettings, provider: ModelProvider, task:
             provider=provider,
             store=store,
             registry_factory=lambda: _build_registry(settings),
+            progress_observer=_show_rlm_progress,
         )
     except BaseException:
         asyncio.run(provider.aclose())
@@ -324,6 +403,7 @@ def _resume_rlm_workspace(settings: ForgeSettings, session_id: str) -> None:
             provider=provider,
             store=store,
             registry_factory=lambda: _build_registry(settings),
+            progress_observer=_show_rlm_progress,
         )
     except BaseException:
         asyncio.run(provider.aclose())
@@ -334,6 +414,29 @@ def _resume_rlm_workspace(settings: ForgeSettings, session_id: str) -> None:
         raise typer.Exit(code=EXIT_CANCELLED) from None
     console.print(f"Session: {store.header.session_id}")
     _show_rlm_results(results)
+
+
+def _show_rlm_progress(session_id: UUID, kind: str, data: dict[str, object]) -> None:
+    if kind == "model_delta":
+        console.print(
+            f"[{str(session_id)[:8]}] Receiving model output: "
+            f"{data.get('text_chars', 0)} text characters, "
+            f"{data.get('argument_chars', 0)} tool-argument characters.",
+            markup=False,
+        )
+    elif kind in {
+        "turn_started",
+        "turn_completed",
+        "turn_cancelled",
+        "model_request_started",
+        "tool_call_requested",
+        "tool_call_completed",
+        "kernel_execution_started",
+        "kernel_execution_completed",
+        "kernel_interrupted",
+        "kernel_restarted",
+    }:
+        console.print(f"[{str(session_id)[:8]}] {kind.replace('_', ' ')}", markup=False)
 
 
 @session_app.command("list")
@@ -767,11 +870,22 @@ def _build_registry(
     settings: ForgeSettings,
     *,
     tracer: RunTracer | None = None,
+    read_only: bool = False,
 ) -> ToolRegistry:
     workspace = Workspace(
         settings.workspace.allowed_root,
         respect_gitignore=settings.workspace.respect_gitignore,
     )
+    if read_only:
+        return ToolRegistry(
+            (
+                ListFilesTool(workspace),
+                ReadFileTool(workspace),
+                SearchCodeTool(workspace),
+                GitDiffTool(workspace),
+                GitStatusTool(workspace),
+            )
+        )
     sandbox = configured_docker_sandbox(settings)
     return ToolRegistry(
         (
