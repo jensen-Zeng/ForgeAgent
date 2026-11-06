@@ -37,6 +37,7 @@ from forge_agent.models import (
     create_model_provider,
 )
 from forge_agent.models.base import Sleep
+from forge_agent.models.streaming import collect_stream
 from forge_agent.tracing import EventBus, EventKind, MemoryEventSink, Redactor, RunTracer
 
 OPENAI_URL = "https://openai.example/v1/chat/completions"
@@ -720,6 +721,72 @@ async def test_openai_explicit_pricing_accounts_for_cached_subset() -> None:
     await provider.aclose()
 
     assert response.usage.cost == Decimal("0.0038")
+
+
+@pytest.mark.parametrize("total", [1500, None, "omitted"])
+async def test_openai_stream_usage_matches_non_streaming_pricing(total: int | str | None) -> None:
+    usage: dict[str, JsonValue] = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 500,
+        "prompt_tokens_details": {"cached_tokens": 200},
+    }
+    if total != "omitted":
+        usage["total_tokens"] = total
+    chunks = [
+        {"choices": [{"delta": {"content": "priced"}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": usage},
+    ]
+    body = "\n\n".join([*("data: " + json.dumps(chunk) for chunk in chunks), "data: [DONE]"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("stream"):
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=openai_response(content="priced", usage=usage))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            model_name="priced-model",
+            api_key="test-key",
+            base_url="https://openai.example/v1",
+            client=client,
+            input_cost_per_million=Decimal("2"),
+            output_cost_per_million=Decimal("4"),
+            cached_input_cost_per_million=Decimal("1"),
+        )
+        generated = await provider.generate(user_request())
+        streamed = await collect_stream(provider, user_request())
+
+    assert streamed.usage == generated.usage
+    assert streamed.usage.cached_input_tokens == 200
+    assert streamed.usage.total_tokens == 1500
+    assert streamed.usage.cost == Decimal("0.0038")
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": -1},
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 1},
+    ],
+)
+async def test_openai_invalid_usage_is_a_provider_error(
+    streaming: bool, usage: dict[str, JsonValue]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        if streaming:
+            body = "data: " + json.dumps({"usage": usage}) + "\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=openai_response(usage=usage))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = make_openai(client=client)
+        with pytest.raises(ProviderResponseError):
+            if streaming:
+                await collect_stream(provider, user_request())
+            else:
+                await provider.generate(user_request())
 
 
 @respx.mock

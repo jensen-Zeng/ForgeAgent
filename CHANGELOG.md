@@ -14,6 +14,7 @@ All notable changes to ForgeAgent are documented here. The project follows seman
 
 ### Fixed
 
+- OpenAI-compatible streaming preserves cached-token pricing and derives missing totals consistently with non-streaming responses; malformed usage returns a provider error.
 - Cancellation now waits for owned model/tool operations to finish cleanup before returning, including cancelled child sessions.
 - Boundary cancellation retains completed tool results and avoids starting another model request.
 - Context compression invalidates duplicate-result references to observations that are no longer available in full.

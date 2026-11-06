@@ -27,6 +27,7 @@ from forge_agent.models.base import (
 )
 from forge_agent.models.wire import (
     OpenAIChatResponse,
+    OpenAIUsage,
     openai_messages,
     openai_tools,
     parse_json_arguments,
@@ -160,12 +161,13 @@ class OpenAICompatibleProvider(HttpModelProvider):
                             request_id = chunk["id"]
                         raw_usage = chunk.get("usage")
                         if isinstance(raw_usage, dict):
-                            usage = Usage(
-                                input_tokens=int(raw_usage.get("prompt_tokens", 0)),
-                                output_tokens=int(raw_usage.get("completion_tokens", 0)),
-                                total_tokens=int(raw_usage.get("total_tokens", 0)),
-                            )
-                            usage = self._price_usage(usage, cached_tokens_included_in_input=True)
+                            try:
+                                wire_usage = OpenAIUsage.model_validate(raw_usage)
+                            except ValidationError as error:
+                                raise ProviderResponseError(
+                                    "OpenAI-compatible stream returned invalid usage counters"
+                                ) from error
+                            usage = self._normalize_usage(wire_usage)
                         choices = chunk.get("choices")
                         if not isinstance(choices, list) or not choices:
                             continue
@@ -263,28 +265,31 @@ class OpenAICompatibleProvider(HttpModelProvider):
             raise ProviderResponseError(
                 "OpenAI-compatible API returned neither text nor tool calls"
             )
-        usage = wire.usage
-        normalized_usage = Usage()
-        if usage is not None:
-            cached = (
-                usage.prompt_tokens_details.cached_tokens
-                if usage.prompt_tokens_details is not None
-                else 0
-            )
-            normalized_usage = Usage(
+        request_id = wire.id or self._request_id_from_headers(response)
+        return ModelResponse(
+            content=tuple(parts),
+            usage=self._normalize_usage(wire.usage),
+            finish_reason=choice.finish_reason,
+            provider_request_id=request_id,
+        )
+
+    def _normalize_usage(self, usage: OpenAIUsage | None) -> Usage:
+        if usage is None:
+            return Usage()
+        cached = (
+            usage.prompt_tokens_details.cached_tokens
+            if usage.prompt_tokens_details is not None
+            else 0
+        )
+        try:
+            normalized = Usage(
                 input_tokens=usage.prompt_tokens,
                 output_tokens=usage.completion_tokens,
                 cached_input_tokens=cached,
                 total_tokens=usage.total_tokens,
             )
-            normalized_usage = self._price_usage(
-                normalized_usage,
-                cached_tokens_included_in_input=True,
-            )
-        request_id = wire.id or self._request_id_from_headers(response)
-        return ModelResponse(
-            content=tuple(parts),
-            usage=normalized_usage,
-            finish_reason=choice.finish_reason,
-            provider_request_id=request_id,
-        )
+        except ValidationError as error:
+            raise ProviderResponseError(
+                "OpenAI-compatible API returned inconsistent usage counters"
+            ) from error
+        return self._price_usage(normalized, cached_tokens_included_in_input=True)
