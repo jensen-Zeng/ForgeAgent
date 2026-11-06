@@ -417,10 +417,11 @@ class AnthropicProvider(HttpModelProvider):
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cache_read_input_tokens,
             )
-            normalized_usage = self._price_usage(
-                normalized_usage,
-                cached_tokens_included_in_input=False,
-            )
+            if {"input_tokens", "output_tokens"}.issubset(usage.model_fields_set):
+                normalized_usage = self._price_usage(
+                    normalized_usage,
+                    cached_tokens_included_in_input=False,
+                )
         request_id = wire.id or self._request_id_from_headers(response)
         return ModelResponse(
             content=tuple(parts),

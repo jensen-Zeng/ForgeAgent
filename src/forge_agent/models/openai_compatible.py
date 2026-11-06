@@ -292,4 +292,6 @@ class OpenAICompatibleProvider(HttpModelProvider):
             raise ProviderResponseError(
                 "OpenAI-compatible API returned inconsistent usage counters"
             ) from error
+        if not {"prompt_tokens", "completion_tokens"}.issubset(usage.model_fields_set):
+            return normalized
         return self._price_usage(normalized, cached_tokens_included_in_input=True)
